@@ -116,8 +116,10 @@ patch_handler() {
 
 patch_handler
 
-# ── 3. Add lib dir to PYTHONPATH ─────────────────────────────────────────────
-export PYTHONPATH="$LIB_DIR:${PYTHONPATH:-/backend}"
+# ── 3. Add lib + src dirs to PYTHONPATH ──────────────────────────────────────
+# lib holds the compiled _fasthash.so; src holds the pure-Python
+# fast_scan_cache helper (used by the opt-in FAST_SCAN_HASH_CACHE path).
+export PYTHONPATH="$LIB_DIR:$SRC_DIR:${PYTHONPATH:-/backend}"
 log "PYTHONPATH=$PYTHONPATH"
 
 # ── 4. Hand off to RomM's real entrypoint ───────────────────────────────────

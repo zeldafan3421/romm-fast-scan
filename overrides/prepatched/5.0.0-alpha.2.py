@@ -11,6 +11,10 @@ try:
     import _fasthash as _fh
 except ImportError:
     _fh = None
+try:
+    import fast_scan_cache as _fsc
+except Exception:
+    _fsc = None
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -537,53 +541,77 @@ class FSRomsHandler(FSHandler):
                     )
                 )
         elif hashable_platform:
-            _used_fast_path = False
-            if _fh is not None and rom_ext not in ARCHIVE_READERS:
-                # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass
+            # Tier-0: reuse stored hashes when the file is unchanged on disk
+            # (opt-in via FAST_SCAN_HASH_CACHE). Returns None when disabled,
+            # unavailable, or the file changed -- then we hash normally below.
+            _cache_hit = None
+            if _fsc is not None and rom_ext not in ARCHIVE_READERS:
                 try:
-                    f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(
-                        _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))
+                    _cache_hit = await asyncio.to_thread(
+                        _fsc.cached_file_hash, rom.id, abs_fs_path, rom.fs_name
                     )
-                    _used_fast_path = True
                 except Exception:
-                    pass  # fall through to Python path below
+                    _cache_hit = None
 
-            if _used_fast_path:
-                rom_crc_c = int(f_crc_hex, 16)
-                rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
-                rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
+            if _cache_hit is not None:
+                c_crc, c_md5, c_sha1, c_chd = _cache_hit
+                rom_crc_c = int(c_crc, 16) if c_crc else 0
+                rom_md5_hex = c_md5
+                rom_sha1_hex = c_sha1
                 file_hash = FileHash(
-                    crc_hash=f_crc_hex if rom_crc_c != DEFAULT_CRC_C else "",
-                    md5_hash=rom_md5_hex,
-                    sha1_hash=rom_sha1_hex,
-                    chd_sha1_hash=(
-                        extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
-                    ),
+                    crc_hash=c_crc,
+                    md5_hash=c_md5,
+                    sha1_hash=c_sha1,
+                    chd_sha1_hash=c_chd,
                 )
             else:
-                # Python path: archive files, or _fh unavailable/failed
-                try:
-                    crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (
-                        await asyncio.to_thread(
-                            self._calculate_rom_hashes,
-                            Path(abs_fs_path, rom.fs_name),
-                            rom_crc_c,
-                            rom_md5_h,
-                            rom_sha1_h,
+                _used_fast_path = False
+                if _fh is not None and rom_ext not in ARCHIVE_READERS:
+                    # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass
+                    try:
+                        f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(
+                            _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))
                         )
+                        _used_fast_path = True
+                    except Exception:
+                        pass  # fall through to Python path below
+
+                if _used_fast_path:
+                    rom_crc_c = int(f_crc_hex, 16)
+                    rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
+                    rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
+                    file_hash = FileHash(
+                        crc_hash=f_crc_hex if rom_crc_c != DEFAULT_CRC_C else "",
+                        md5_hash=rom_md5_hex,
+                        sha1_hash=rom_sha1_hex,
+                        chd_sha1_hash=(
+                            extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
+                        ),
                     )
-                except zlib.error:
-                    crc_c = 0
-                    md5_h = hashlib.md5(usedforsecurity=False)
-                    sha1_h = hashlib.sha1(usedforsecurity=False)
-                file_hash = _make_file_hash(
-                    crc_c,
-                    md5_h,
-                    sha1_h,
-                    chd_sha1_hash=(
-                        extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
-                    ),
-                )
+                else:
+                    # Python path: archive files, or _fh unavailable/failed
+                    try:
+                        crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (
+                            await asyncio.to_thread(
+                                self._calculate_rom_hashes,
+                                Path(abs_fs_path, rom.fs_name),
+                                rom_crc_c,
+                                rom_md5_h,
+                                rom_sha1_h,
+                            )
+                        )
+                    except zlib.error:
+                        crc_c = 0
+                        md5_h = hashlib.md5(usedforsecurity=False)
+                        sha1_h = hashlib.sha1(usedforsecurity=False)
+                    file_hash = _make_file_hash(
+                        crc_c,
+                        md5_h,
+                        sha1_h,
+                        chd_sha1_hash=(
+                            extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
+                        ),
+                    )
 
             # Calculate the RA hash if the platform has a slug that matches a known RA slug
             if calculate_hashes:

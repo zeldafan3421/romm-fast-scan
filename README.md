@@ -97,6 +97,19 @@ Set `SCAN_WORKERS` in your pod YAML based on your storage:
 
 With the GIL released, workers actually run in parallel — unlike stock RomM where extra workers above ~2 give diminishing returns.
 
+### Optional: skip re-reading unchanged files
+
+`Complete` and `Rescan hashes` scans normally re-read every byte of every ROM, even when nothing on disk changed. RomM already stores each file's size, mtime, and hashes. Set this env var to reuse the stored hashes whenever a file's size **and** mtime are unchanged, skipping the read entirely:
+
+```yaml
+- name: FAST_SCAN_HASH_CACHE
+  value: "1"
+```
+
+On an unchanged library this turns a full rescan from "read every byte" into a stat pass — minutes instead of hours on an HDD. It composes with the C extension, which still accelerates the files that actually changed.
+
+**Default off** — it's opt-in because a file edited in place that preserves both its size and mtime (rare; some sync tools do this) would not be re-hashed. It is fail-safe: any problem (disabled, unavailable, file changed, no stored record) falls back to reading and hashing the file normally, so it can never produce a wrong hash. Scope: single-file ROMs; multi-disc and archive ROMs always hash normally.
+
 ---
 
 ## Staying up to date with RomM
@@ -141,7 +154,8 @@ No ROM data is ever at risk.
 ```
 romm-fast-scan/
 ├── src/
-│   └── _fasthash.c              C extension: CRC32 + MD5 + SHA1 with GIL release
+│   ├── _fasthash.c              C extension: CRC32 + MD5 + SHA1 with GIL release
+│   └── fast_scan_cache.py       Opt-in hash-skip cache (FAST_SCAN_HASH_CACHE)
 ├── overrides/
 │   └── prepatched/              Pre-patched handlers, one per known RomM version
 │       ├── 4.9.2.py             (used when container SHA matches 4.9.2)

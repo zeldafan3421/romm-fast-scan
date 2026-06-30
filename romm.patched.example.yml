@@ -37,6 +37,11 @@ spec:
           value: changeme-generate-with-openssl-rand-hex-32
         - name: SCAN_WORKERS
           value: "4"
+        # ── fast-scan plugin: optional hash-skip cache ────────────────────
+        # Reuse stored hashes for files whose size+mtime are unchanged on
+        # Complete / Rescan-hashes scans. Off by default; see README.
+        # - name: FAST_SCAN_HASH_CACHE
+        #   value: "1"
         # ── fast-scan plugin: make _fasthash.so importable ────────────────
         - name: PYTHONPATH
           value: "/romm-plugin/lib:/backend"

@@ -288,6 +288,116 @@ if ! grep -q "_fasthash" "$TMP_PATCHED"; then
     exit 1
 fi
 
+# ── Inject the opt-in hash-skip cache (FAST_SCAN_HASH_CACHE) ──────────────────
+# This authoritatively rewrites the single-file `elif hashable_platform:` branch
+# (between the branch header and the RA-hash comment that follows it) so the
+# cache check is always present after a refresh, regardless of how the fast-path
+# block above was produced. Keyed only on version-independent anchors.
+log "Injecting hash-skip cache logic..."
+"$PYTHON" - "$TMP_PATCHED" << 'PYEOF'
+import sys
+path = sys.argv[1]
+out = open(path).read()
+
+IMPORT_ANCHOR = (
+    "try:\n    import _fasthash as _fh\nexcept ImportError:\n    _fh = None\n"
+)
+IMPORT_NEW = IMPORT_ANCHOR + (
+    "try:\n    import fast_scan_cache as _fsc\nexcept Exception:\n    _fsc = None\n"
+)
+if "_fsc" not in out and out.count(IMPORT_ANCHOR) == 1:
+    out = out.replace(IMPORT_ANCHOR, IMPORT_NEW, 1)
+
+START = "        elif hashable_platform:\n"
+END = "            # Calculate the RA hash"
+NEW_BRANCH = '''        elif hashable_platform:
+            # Tier-0: reuse stored hashes when the file is unchanged on disk
+            # (opt-in via FAST_SCAN_HASH_CACHE). Returns None when disabled,
+            # unavailable, or the file changed -- then we hash normally below.
+            _cache_hit = None
+            if _fsc is not None and rom_ext not in ARCHIVE_READERS:
+                try:
+                    _cache_hit = await asyncio.to_thread(
+                        _fsc.cached_file_hash, rom.id, abs_fs_path, rom.fs_name
+                    )
+                except Exception:
+                    _cache_hit = None
+
+            if _cache_hit is not None:
+                c_crc, c_md5, c_sha1, c_chd = _cache_hit
+                rom_crc_c = int(c_crc, 16) if c_crc else 0
+                rom_md5_hex = c_md5
+                rom_sha1_hex = c_sha1
+                file_hash = FileHash(
+                    crc_hash=c_crc,
+                    md5_hash=c_md5,
+                    sha1_hash=c_sha1,
+                    chd_sha1_hash=c_chd,
+                )
+            else:
+                _used_fast_path = False
+                if _fh is not None and rom_ext not in ARCHIVE_READERS:
+                    # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass
+                    try:
+                        f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(
+                            _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))
+                        )
+                        _used_fast_path = True
+                    except Exception:
+                        pass  # fall through to Python path below
+
+                if _used_fast_path:
+                    rom_crc_c = int(f_crc_hex, 16)
+                    rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
+                    rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
+                    file_hash = FileHash(
+                        crc_hash=f_crc_hex if rom_crc_c != DEFAULT_CRC_C else "",
+                        md5_hash=rom_md5_hex,
+                        sha1_hash=rom_sha1_hex,
+                        chd_sha1_hash=(
+                            extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
+                        ),
+                    )
+                else:
+                    # Python path: archive files, or _fh unavailable/failed
+                    try:
+                        crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (
+                            await asyncio.to_thread(
+                                self._calculate_rom_hashes,
+                                Path(abs_fs_path, rom.fs_name),
+                                rom_crc_c,
+                                rom_md5_h,
+                                rom_sha1_h,
+                            )
+                        )
+                    except zlib.error:
+                        crc_c = 0
+                        md5_h = hashlib.md5(usedforsecurity=False)
+                        sha1_h = hashlib.sha1(usedforsecurity=False)
+                    file_hash = _make_file_hash(
+                        crc_c,
+                        md5_h,
+                        sha1_h,
+                        chd_sha1_hash=(
+                            extract_chd_hash(rom_dir) if is_chd_file(rom_dir) else ""
+                        ),
+                    )
+
+'''
+if "_cache_hit" not in out and START in out and END in out:
+    s = out.index(START)
+    e = out.index(END, s)
+    out = out[:s] + NEW_BRANCH + out[e:]
+
+open(path, "w").write(out)
+print("Cache injection complete.")
+PYEOF
+
+if ! grep -q "_cache_hit" "$TMP_PATCHED"; then
+    log "WARNING: could not inject hash-skip cache — fast path still works,"
+    log "         but FAST_SCAN_HASH_CACHE will be a no-op on this version."
+fi
+
 # Generate new patch from stock → patched.
 # Use stable header names so the committed patch has no machine-specific paths.
 diff -u "$TMP_STOCK" "$TMP_PATCHED" \
