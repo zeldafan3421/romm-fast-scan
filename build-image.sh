@@ -33,16 +33,24 @@ fi
 
 echo "Builder: $BUILDER"
 
+# Choose the build file based on which builder is available
+if [ "$BUILDER" = "podman" ]; then
+    BUILD_FILE="Containerfile"
+else
+    BUILD_FILE="Dockerfile"
+fi
+
 # Detect if we need to use --build-arg for a custom version
 if [ "$VERSION" != "4.9.2" ]; then
     echo "Using custom base image: docker.io/rommapp/romm:$VERSION"
     $BUILDER build \
+        -f "$BUILD_FILE" \
         --build-arg "BASE_IMAGE=docker.io/rommapp/romm:$VERSION" \
         -t "$TAG" \
         "$SCRIPT_DIR"
 else
     echo "Using default base image: docker.io/rommapp/romm:4.9.2"
-    $BUILDER build -t "$TAG" "$SCRIPT_DIR"
+    $BUILDER build -f "$BUILD_FILE" -t "$TAG" "$SCRIPT_DIR"
 fi
 
 echo ""

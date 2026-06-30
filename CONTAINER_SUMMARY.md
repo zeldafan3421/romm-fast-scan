@@ -6,8 +6,12 @@ This document summarizes the automated container image building approach for the
 
 ## What Was Created
 
-### **Containerfile** (Docker/Podman native format)
-- Multi-stage build:
+### **Containerfile & Dockerfile**
+Both files are identical; they exist for tool compatibility:
+- **Containerfile** — Used by `podman build` (Podman-native format)
+- **Dockerfile** — Used by `docker build` and `docker buildx` (Docker-native format)
+
+Multi-stage build:
   - **Stage 1 (builder):** Compile the C extension using Alpine + gcc
   - **Stage 2 (final):** RomM base image + pre-compiled .so + plugin files
 - Pins to RomM 4.9.2 (default, can override with `--build-arg`)

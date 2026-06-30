@@ -6,7 +6,7 @@ This guide covers building a Podman/Docker image with the fast-scan plugin pre-i
 
 ## Overview
 
-The `Containerfile` builds a RomM image with:
+The build files (`Containerfile` for Podman, `Dockerfile` for Docker) build a RomM image with:
 - ✅ C extension pre-compiled (no runtime compilation needed)
 - ✅ Plugin files pre-installed
 - ✅ Fast boot (compilation happens once, at build time)
@@ -24,6 +24,20 @@ This is different from the volume-mount approach (in README.md), which:
 
 ---
 
+## Build Files
+
+- **`Containerfile`** — Podman-native format (recommended for Podman)
+- **`Dockerfile`** — Docker-native format (required for Docker/Docker Buildx)
+
+Both files are identical. Use whichever matches your container runtime:
+- `podman build` → uses `Containerfile` automatically
+- `docker build` → uses `Dockerfile` automatically
+- `docker buildx build` → uses `Dockerfile` (must be present)
+
+If you're using Docker and get `no such file or directory`, the `Dockerfile` should fix it.
+
+---
+
 ## Prerequisites
 
 - `podman` or `docker` installed
@@ -36,9 +50,21 @@ This is different from the volume-mount approach (in README.md), which:
 
 ### Quick Build (4.9.2)
 
+**With Podman:**
 ```sh
 cd /path/to/romm-fast-scan
 podman build -t romm:4.9.2-fast-scan .
+```
+
+**With Docker:**
+```sh
+cd /path/to/romm-fast-scan
+docker build -t romm:4.9.2-fast-scan .
+```
+
+**With Docker Buildx (multi-arch, faster cache):**
+```sh
+docker buildx build -t romm:4.9.2-fast-scan --load .
 ```
 
 Expected output:
