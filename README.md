@@ -180,8 +180,6 @@ romm-fast-scan/
 ├── examples/                    Example configurations
 │   └── romm.patched.example.yml Example of a fully patched pod YAML
 │
-├── docs/                        📁 Comprehensive documentation (9 files)
-│
 └── Other:
     ├── LICENSE                  AGPL-3.0
     ├── NOTICE                   Derivative work attribution
@@ -192,17 +190,16 @@ romm-fast-scan/
 
 ## Documentation
 
-Complete documentation is in the [`docs/`](docs/) directory:
+📖 **See the [Wiki](https://github.com/zeldafan3421/romm-fast-scan/wiki)** for comprehensive documentation:
 
-- **[docs/BUILD_QUICK_START.md](docs/BUILD_QUICK_START.md)** — Quick build reference (one-liners)
-- **[docs/TESTING.md](docs/TESTING.md)** — Testing procedures, benchmarks, validation
-- **[docs/PRE_DEPLOYMENT_CHECKLIST.md](docs/PRE_DEPLOYMENT_CHECKLIST.md)** — Pre-production readiness checklist
-- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Common issues and solutions
-- **[docs/EDGE_CASES.md](docs/EDGE_CASES.md)** — Edge cases, limitations, and workarounds
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Technical internals, three-tier design, performance
-- **[docs/CONTAINER_BUILD.md](docs/CONTAINER_BUILD.md)** — Building and deploying container images
-- **[docs/CONTAINER_SUMMARY.md](docs/CONTAINER_SUMMARY.md)** — Container design decisions and maintenance
-- **[docs/DOCUMENTATION_SUMMARY.md](docs/DOCUMENTATION_SUMMARY.md)** — Doc index, gaps, improvements
+- [Quick Start](https://github.com/zeldafan3421/romm-fast-scan/wiki/Home) — Build reference
+- [Testing](https://github.com/zeldafan3421/romm-fast-scan/wiki/Testing) — Test procedures and benchmarks
+- [Pre-Deployment Checklist](https://github.com/zeldafan3421/romm-fast-scan/wiki/Pre-Deployment-Checklist) — Readiness validation
+- [Troubleshooting](https://github.com/zeldafan3421/romm-fast-scan/wiki/Troubleshooting) — Common issues
+- [Edge Cases](https://github.com/zeldafan3421/romm-fast-scan/wiki/Edge-Cases) — Limitations and workarounds
+- [Architecture](https://github.com/zeldafan3421/romm-fast-scan/wiki/Architecture) — Technical internals
+- [Container Build](https://github.com/zeldafan3421/romm-fast-scan/wiki/Container-Build) — Building images
+- [Container Design](https://github.com/zeldafan3421/romm-fast-scan/wiki/Container-Design) — Design & maintenance
 
 ---
 
