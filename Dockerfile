@@ -82,7 +82,8 @@ COPY overrides/prepatched/ /romm-plugin/overrides/prepatched/
 COPY roms_handler.patch /romm-plugin/
 COPY known_sha256.txt /romm-plugin/
 COPY start.sh /romm-plugin/start.sh
-COPY refresh.sh /romm-plugin/refresh.sh
+COPY scripts/refresh.sh /romm-plugin/refresh.sh
+
 
 # Make scripts executable
 RUN chmod +x /romm-plugin/start.sh /romm-plugin/refresh.sh
