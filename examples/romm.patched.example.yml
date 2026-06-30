@@ -1,3 +1,8 @@
+# Illustrative example of a pod YAML after running scripts/patch_romm_yaml.py.
+# Comments here are hand-formatted for readability; the script's actual output
+# uses slightly different comment wording but the same four structural changes
+# (entrypoint override, PYTHONPATH, volumeMount, volume). Don't diff this file
+# against your own romm.yml expecting an exact match.
 apiVersion: v1
 kind: Pod
 metadata:

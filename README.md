@@ -39,7 +39,8 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 mkdir -p /opt/romm/fast-scan-plugin/lib
 cp -r src overrides start.sh roms_handler.patch known_sha256.txt \
       /opt/romm/fast-scan-plugin/
-chmod +x /opt/romm/fast-scan-plugin/start.sh
+cp scripts/refresh.sh /opt/romm/fast-scan-plugin/
+chmod +x /opt/romm/fast-scan-plugin/start.sh /opt/romm/fast-scan-plugin/refresh.sh
 ```
 
 Or run the install helper:
@@ -61,7 +62,7 @@ This backs up your existing `romm.yml` and adds three things:
 - `PYTHONPATH=/romm-plugin/lib:/backend` — makes the compiled `.so` importable
 - A `hostPath` volume mount for the plugin directory
 
-See `romm.patched.example.yml` for the full expected result.
+See `examples/romm.patched.example.yml` for the full expected result.
 
 ### 3. Restart the pod
 
@@ -148,6 +149,24 @@ No ROM data is ever at risk.
 
 ---
 
+## Uninstallation
+
+```sh
+sh scripts/uninstall.sh /opt/romm/fast-scan-plugin /path/to/romm.yml
+podman pod stop romm-pod && podman pod rm romm-pod && podman play kube /path/to/romm.yml
+```
+
+This:
+- Reverts `romm.yml` to stock RomM — removes the entrypoint override, `PYTHONPATH`, and volume mount that `patch_romm_yaml.py` added (backs up first, same as installing)
+- Deletes the plugin directory from the host
+- Leaves your ROM library, RomM's database, and any `romm.yml.bak.*` backups untouched
+
+Hashes already computed by the C extension are ordinary CRC32/MD5/SHA1 values — RomM doesn't know or care they came from the plugin, so nothing needs to be re-scanned after uninstalling.
+
+Omit the `romm.yml` argument to only remove the plugin directory and leave your pod YAML as-is (you'll see a reminder with the command to run later). To revert just the YAML without touching the plugin directory, run `python3 scripts/unpatch_romm_yaml.py /path/to/romm.yml` directly.
+
+---
+
 ## File layout
 
 ```
@@ -172,10 +191,12 @@ romm-fast-scan/
 │   └── .github/workflows/       GitHub Actions CI/CD
 │
 ├── scripts/                     Utility scripts
-│   ├── install.sh               Host-side plugin deployment
-│   ├── patch_romm_yaml.py       Patches your romm.yml in-place (with backup)
-│   ├── build-image.sh           Container image builder helper
-│   └── refresh.sh               Re-generates patch after a RomM update
+│   ├── install.sh                Host-side plugin deployment
+│   ├── uninstall.sh              Host-side plugin removal (reverts romm.yml + deletes files)
+│   ├── patch_romm_yaml.py        Patches your romm.yml in-place (with backup)
+│   ├── unpatch_romm_yaml.py      Reverts romm.yml to stock (with backup)
+│   ├── build-image.sh            Container image builder helper
+│   └── refresh.sh                Re-generates patch after a RomM update
 │
 ├── examples/                    Example configurations
 │   └── romm.patched.example.yml Example of a fully patched pod YAML

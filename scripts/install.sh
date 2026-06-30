@@ -1,12 +1,13 @@
 #!/bin/sh
-# fast_scan_plugin/install.sh
+# scripts/install.sh
 # Run this ONCE on the host to deploy the plugin.
-# Usage:  sh install.sh [--plugin-dest /path/to/dest]
+# Usage:  sh scripts/install.sh [/path/to/dest]
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 DEST="${1:-/opt/romm/fast-scan-plugin}"
 
 echo "=== romm-fast-scan plugin installer ==="
@@ -15,34 +16,27 @@ echo ""
 # ── 1. Copy plugin files to the service data directory ───────────────────────
 echo "→ Installing plugin files to: $DEST"
 mkdir -p "$DEST/lib"
-cp -r "$SCRIPT_DIR/src"       "$DEST/"
-cp -r "$SCRIPT_DIR/overrides" "$DEST/"
-cp    "$SCRIPT_DIR/start.sh"  "$DEST/"
-chmod +x "$DEST/start.sh"
+cp -r "$REPO_ROOT/src"               "$DEST/"
+cp -r "$REPO_ROOT/overrides"         "$DEST/"
+cp    "$REPO_ROOT/start.sh"          "$DEST/"
+cp    "$REPO_ROOT/roms_handler.patch" "$DEST/"
+cp    "$REPO_ROOT/known_sha256.txt"  "$DEST/"
+cp    "$SCRIPT_DIR/refresh.sh"       "$DEST/"
+chmod +x "$DEST/start.sh" "$DEST/refresh.sh"
 touch "$DEST/lib/.gitkeep"
 
 echo "  Done."
 echo ""
+echo "  To remove the plugin later, run: sh $SCRIPT_DIR/uninstall.sh $DEST"
+echo ""
 
-# ── 2. Check for the patched romm.yml ────────────────────────────────────────
-PATCHED="$(dirname "$SCRIPT_DIR")/romm.patched.yml"
-
-if [ -f "$PATCHED" ]; then
-    echo "→ A ready-to-use pod YAML is at:"
-    echo "    $PATCHED"
-    echo ""
-    echo "  To apply it:"
-    echo "    podman pod stop  romm-pod  2>/dev/null || true"
-    echo "    podman pod rm    romm-pod  2>/dev/null || true"
-    echo "    podman play kube $PATCHED"
-    echo ""
-    echo "  Or if you prefer to keep your existing romm.yml, the three changes"
-    echo "  you need are shown in the diff below:"
-    echo ""
-    diff "$(dirname "$SCRIPT_DIR")/romm.yml" "$PATCHED" || true
-else
-    echo "  (romm.patched.yml not found — diff skipped)"
-fi
+# ── 2. Patch your pod YAML ────────────────────────────────────────────────────
+echo "→ Next, wire the plugin into your pod YAML:"
+echo "    python3 $SCRIPT_DIR/patch_romm_yaml.py /path/to/romm.yml $DEST"
+echo ""
+echo "  This backs up romm.yml and adds the entrypoint override, PYTHONPATH,"
+echo "  and volume mount needed to load the plugin. See"
+echo "  $REPO_ROOT/examples/romm.patched.example.yml for the expected result."
 
 # ── 3. Sanity check ──────────────────────────────────────────────────────────
 echo ""
