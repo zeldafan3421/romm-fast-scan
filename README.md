@@ -2,7 +2,7 @@
 
 A drop-in scanning performance plugin for [RomM](https://github.com/rommapp/romm) that replaces the pure-Python file hashing path with a C extension that releases the GIL, enabling genuine parallel hashing across scan workers.
 
-Tested on **RomM 4.9.2**. Includes tooling to stay compatible across updates.
+Verified against **RomM 4.9.2** and **5.0.0-alpha.2**. Includes tooling to stay compatible across updates.
 
 ---
 
@@ -103,8 +103,8 @@ With the GIL released, workers actually run in parallel — unlike stock RomM wh
 
 On each boot `start.sh` patches `roms_handler.py` using a three-tier strategy:
 
-1. **SHA match** — if the container's file matches `known_sha256.txt`, use the pre-patched copy (fastest, safest)
-2. **Patch applies** — if the SHA doesn't match, try applying `roms_handler.patch` (survives minor upstream changes)
+1. **SHA match** — `known_sha256.txt` maps each known upstream file SHA to its own pre-patched copy. If the container's file matches any listed version, that copy is installed verbatim (fastest, safest). Multiple RomM versions are supported simultaneously, so the exact-match path keeps working after a `docker pull` to a version you've already refreshed against.
+2. **Patch applies** — if the SHA doesn't match, try applying `roms_handler.patch` (survives minor upstream changes — e.g. it already applies cleanly to 5.0.0-alpha.2, whose changes don't touch the hashing path)
 3. **Graceful fallback** — if neither works, log a warning and start RomM normally with pure-Python hashing
 
 When you see this warning after a `docker pull`:
@@ -143,15 +143,16 @@ romm-fast-scan/
 ├── src/
 │   └── _fasthash.c              C extension: CRC32 + MD5 + SHA1 with GIL release
 ├── overrides/
-│   └── handler/filesystem/
-│       └── roms_handler.py      Patched handler (RomM 4.9.2 base)
+│   └── prepatched/              Pre-patched handlers, one per known RomM version
+│       ├── 4.9.2.py             (used when container SHA matches 4.9.2)
+│       └── 5.0.0-alpha.2.py     (used when container SHA matches 5.0.0-alpha.2)
 ├── lib/                         Compiled .so lands here at runtime (gitignored)
 ├── start.sh                     Container entrypoint wrapper
 ├── refresh.sh                   Re-generates patch after a RomM update
 ├── install.sh                   Host-side setup helper
 ├── patch_romm_yaml.py           Patches your romm.yml in-place (with backup)
 ├── roms_handler.patch           Minimal unified diff applied at boot
-├── known_sha256.txt             SHA256 of the roms_handler.py this was built against
+├── known_sha256.txt             Maps each known roms_handler.py SHA → pre-patched file
 └── romm.patched.example.yml     Example of a fully patched pod YAML
 ```
 
@@ -161,7 +162,7 @@ romm-fast-scan/
 
 AGPL-3.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-`overrides/handler/filesystem/roms_handler.py` is a derivative work of
+The pre-patched handlers under `overrides/prepatched/` are derivative works of
 [rommapp/romm](https://github.com/rommapp/romm), which is also AGPL-3.0.
 
 ---

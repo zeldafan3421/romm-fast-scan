@@ -5,7 +5,7 @@ Copyright (C) 2026 Aiden Ross (zeldafan3421)
 DERIVATIVE WORK NOTICE
 ────────────────────────────────────────────────────────────────────────────────
 
-The file overrides/handler/filesystem/roms_handler.py is a modified version
+The pre-patched files under overrides/prepatched/ are modified versions
 of backend/handler/filesystem/roms_handler.py from the RomM project:
 
   https://github.com/rommapp/romm

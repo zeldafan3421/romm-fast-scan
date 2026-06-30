@@ -18,7 +18,7 @@ SRC_DIR="$PLUGIN_DIR/src"
 
 TARGET_PY="/backend/handler/filesystem/roms_handler.py"
 PATCH_FILE="$PLUGIN_DIR/roms_handler.patch"
-OVERRIDE_PY="$PLUGIN_DIR/overrides/handler/filesystem/roms_handler.py"
+PREPATCHED_DIR="$PLUGIN_DIR/overrides/prepatched"
 KNOWN_SHA_FILE="$PLUGIN_DIR/known_sha256.txt"
 
 PYTHON=$(command -v python3.13 2>/dev/null || command -v python3 2>/dev/null || echo "python3")
@@ -72,14 +72,21 @@ compile_extension || true
 patch_handler() {
     [ -f "$TARGET_PY" ] || { log "Target $TARGET_PY not found — skipping patch"; return; }
 
-    # a. Exact SHA match: safe to copy pre-patched file directly
-    if [ -f "$KNOWN_SHA_FILE" ] && [ -f "$OVERRIDE_PY" ]; then
-        KNOWN_SHA=$(awk 'NR==1{print $1}' "$KNOWN_SHA_FILE")
+    # a. Exact SHA match: safe to copy the matching pre-patched file directly.
+    #    known_sha256.txt maps each known UNPATCHED upstream SHA to its own
+    #    pre-patched file, so multiple RomM versions are supported at once.
+    if [ -f "$KNOWN_SHA_FILE" ] && [ -d "$PREPATCHED_DIR" ]; then
         CURRENT_SHA=$(sha256sum "$TARGET_PY" 2>/dev/null | awk '{print $1}')
-        if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" = "$KNOWN_SHA" ]; then
-            cp "$OVERRIDE_PY" "$TARGET_PY" \
-                && log "Installed roms_handler.py (exact version match)" \
-                && return
+        if [ -n "$CURRENT_SHA" ]; then
+            # Read "<sha> <filename>" lines, skipping comments and blanks.
+            MATCH_FILE=$(awk -v cur="$CURRENT_SHA" \
+                '/^[[:space:]]*#/ || /^[[:space:]]*$/ {next} $1==cur {print $2; exit}' \
+                "$KNOWN_SHA_FILE")
+            if [ -n "$MATCH_FILE" ] && [ -f "$PREPATCHED_DIR/$MATCH_FILE" ]; then
+                cp "$PREPATCHED_DIR/$MATCH_FILE" "$TARGET_PY" \
+                    && log "Installed roms_handler.py (exact match: $MATCH_FILE)" \
+                    && return
+            fi
         fi
     fi
 

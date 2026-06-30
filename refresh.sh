@@ -14,11 +14,36 @@ set -e
 PLUGIN_DIR="/romm-plugin"
 STOCK_PY="/backend/handler/filesystem/roms_handler.py"
 PATCH_FILE="$PLUGIN_DIR/roms_handler.patch"
-OVERRIDE_PY="$PLUGIN_DIR/overrides/handler/filesystem/roms_handler.py"
+PREPATCHED_DIR="$PLUGIN_DIR/overrides/prepatched"
 KNOWN_SHA_FILE="$PLUGIN_DIR/known_sha256.txt"
 PYTHON=$(command -v python3.13 2>/dev/null || command -v python3 2>/dev/null || echo "python3")
 
 log() { echo "[refresh] $*"; }
+
+# record_version <patched-file> <stock-sha> <romm-version>
+# Writes the patched file into overrides/prepatched/ under a version-derived
+# name and records (or updates) its entry in known_sha256.txt. Existing
+# entries for other versions are preserved, so tier-1 keeps working across
+# every RomM version this has ever been refreshed against.
+record_version() {
+    _patched="$1"; _sha="$2"; _ver="$3"
+    mkdir -p "$PREPATCHED_DIR"
+
+    # Build a filesystem-safe name; fall back to a short SHA if version unknown.
+    _name=$(printf '%s' "$_ver" | tr -c 'A-Za-z0-9._-' '_')
+    [ -z "$_name" ] || [ "$_name" = "unknown" ] && _name="sha-$(printf '%s' "$_sha" | cut -c1-12)"
+    _name="${_name}.py"
+
+    cp "$_patched" "$PREPATCHED_DIR/$_name"
+
+    # Ensure the map file exists, then drop any stale line for this SHA and append fresh.
+    [ -f "$KNOWN_SHA_FILE" ] || : > "$KNOWN_SHA_FILE"
+    grep -v "^${_sha}[[:space:]]" "$KNOWN_SHA_FILE" > "${KNOWN_SHA_FILE}.tmp" 2>/dev/null || : > "${KNOWN_SHA_FILE}.tmp"
+    mv "${KNOWN_SHA_FILE}.tmp" "$KNOWN_SHA_FILE"
+    printf '%s  %s    # RomM %s\n' "$_sha" "$_name" "$_ver" >> "$KNOWN_SHA_FILE"
+
+    log "Recorded version: $_name (SHA ${_sha%"${_sha#????????}"}…) in known_sha256.txt"
+}
 
 [ -f "$STOCK_PY" ] || { echo "ERROR: $STOCK_PY not found"; exit 1; }
 
@@ -44,9 +69,8 @@ if patch --dry-run -N -s "$TMP_STOCK" "$PATCH_FILE" 2>/dev/null; then
     cp "$TMP_STOCK" "$TMP_PATCHED"
     patch -N -s "$TMP_PATCHED" "$PATCH_FILE" 2>/dev/null
     log "Existing patch applied cleanly — no regeneration needed."
-    log "Updating known_sha256.txt for new version..."
-    printf '%s  roms_handler.py (RomM %s)\n' "$NEW_SHA" "$ROMM_VER" > "$KNOWN_SHA_FILE"
-    cp "$TMP_PATCHED" "$OVERRIDE_PY"
+    log "Recording new version for the tier-1 fast path..."
+    record_version "$TMP_PATCHED" "$NEW_SHA" "$ROMM_VER"
     rm -f "$TMP_STOCK" "$TMP_PATCHED"
     log "Done. Restart the pod to activate."
     exit 0
@@ -264,12 +288,15 @@ if ! grep -q "_fasthash" "$TMP_PATCHED"; then
     exit 1
 fi
 
-# Generate new patch from stock → patched
-diff -u "$TMP_STOCK" "$TMP_PATCHED" > "$PATCH_FILE" || true
+# Generate new patch from stock → patched.
+# Use stable header names so the committed patch has no machine-specific paths.
+diff -u "$TMP_STOCK" "$TMP_PATCHED" \
+    | sed -e "1s|^--- .*|--- roms_handler.py.orig|" \
+          -e "2s|^+++ .*|+++ roms_handler.py|" \
+    > "$PATCH_FILE" || true
 
-# Update stored override and SHA
-cp "$TMP_PATCHED" "$OVERRIDE_PY"
-printf '%s  roms_handler.py (RomM %s)\n' "$NEW_SHA" "$ROMM_VER" > "$KNOWN_SHA_FILE"
+# Record the new version (preserves entries for all previously-known versions)
+record_version "$TMP_PATCHED" "$NEW_SHA" "$ROMM_VER"
 
 rm -f "$TMP_STOCK" "$TMP_PATCHED"
 
