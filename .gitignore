@@ -1,0 +1,9 @@
+lib/*.so
+lib/*.pyd
+lib/*.dylib
+__pycache__/
+*.pyc
+*.pyo
+romm.yml
+romm.*.yml
+!romm.patched.example.yml

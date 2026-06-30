@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: romm-pod
+  labels:
+    app: romm
+spec:
+  containers:
+    - name: romm-app
+      image: docker.io/rommapp/romm:latest
+      restartPolicy: Always
+
+      # ── fast-scan plugin: override entrypoint ───────────────────────────
+      # start.sh compiles _fasthash.so on first boot, patches roms_handler.py,
+      # then calls the normal /docker-entrypoint.sh /init.
+      command: ["/romm-plugin/start.sh"]
+
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+      env:
+        - name: USER_ID
+          value: "1000"
+        - name: GROUP_ID
+          value: "1000"
+        - name: TZ
+          value: UTC
+        - name: DB_HOST
+          value: "127.0.0.1"
+        - name: DB_NAME
+          value: romm
+        - name: DB_USER
+          value: romm-user
+        - name: DB_PASSWD
+          value: changeme
+        - name: ROMM_AUTH_SECRET_KEY
+          value: changeme-generate-with-openssl-rand-hex-32
+        - name: SCAN_WORKERS
+          value: "4"
+        # ── fast-scan plugin: make _fasthash.so importable ────────────────
+        - name: PYTHONPATH
+          value: "/romm-plugin/lib:/backend"
+
+      volumeMounts:
+        - name: library-folder
+          mountPath: "/romm/library"
+          readOnly: true
+        - name: romm-resources
+          mountPath: "/romm/resources"
+        - name: romm-redis
+          mountPath: "/redis-data"
+        - name: romm-assets
+          mountPath: "/romm/assets"
+        - name: romm-config
+          mountPath: "/romm/config"
+        # ── fast-scan plugin volume ───────────────────────────────────────
+        - name: romm-fast-scan-plugin
+          mountPath: "/romm-plugin"
+
+    - name: romm-db
+      image: docker.io/mariadb:latest
+      env:
+        - name: MARIADB_ROOT_PASSWORD
+          value: changeme
+        - name: MARIADB_DATABASE
+          value: romm
+        - name: MARIADB_USER
+          value: romm-user
+        - name: MARIADB_PASSWORD
+          value: changeme
+      volumeMounts:
+        - name: mysql_data
+          mountPath: "/var/lib/mysql"
+      startupProbe:
+      exec:
+        command:
+          - healthcheck.sh
+          - --connect
+          - --innodb_initialized
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      failureThreshold: 3
+
+  volumes:
+    - name: library-folder
+      hostPath:
+        path: /your/games/library        # <-- change this
+        type: Directory
+    - name: romm-resources
+      hostPath:
+        path: /your/romm/data/resources  # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-redis
+      hostPath:
+        path: /your/romm/data/redis-data # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-assets
+      hostPath:
+        path: /your/romm/data/assets     # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-config
+      hostPath:
+        path: /your/romm/config          # <-- change this
+        type: DirectoryOrCreate
+    - name: mysql_data
+      persistentVolumeClaim:
+        claimName: rommdb-data
+    # ── fast-scan plugin volume ───────────────────────────────────────────
+    - name: romm-fast-scan-plugin
+      hostPath:
+        path: /opt/romm/fast-scan-plugin # <-- where you ran install.sh
+        type: Directory

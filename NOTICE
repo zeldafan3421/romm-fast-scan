@@ -1,0 +1,34 @@
+romm-fast-scan — fast scanning plugin for RomM
+Copyright (C) 2026 Aiden Ross (zeldafan3421)
+
+────────────────────────────────────────────────────────────────────────────────
+DERIVATIVE WORK NOTICE
+────────────────────────────────────────────────────────────────────────────────
+
+The file overrides/handler/filesystem/roms_handler.py is a modified version
+of backend/handler/filesystem/roms_handler.py from the RomM project:
+
+  https://github.com/rommapp/romm
+  Copyright (C) the RomM contributors
+  Licensed under the GNU Affero General Public License v3.0
+
+Modifications made in this project add a C extension fast path
+(see src/_fasthash.c) for GIL-released parallel hashing, with full
+fallback to the original Python implementation when the extension is
+unavailable.
+
+────────────────────────────────────────────────────────────────────────────────
+AI ASSISTANCE DISCLOSURE
+────────────────────────────────────────────────────────────────────────────────
+
+This project was developed with the assistance of Claude (claude-sonnet-4-6),
+an AI assistant made by Anthropic (https://www.anthropic.com).
+
+Claude contributed to:
+  - Design and implementation of the _fasthash C extension (src/_fasthash.c)
+  - The plugin architecture (start.sh, refresh.sh, install.sh)
+  - The patch-based update resilience mechanism
+  - The roms_handler.py modifications
+
+The author reviewed, tested, and directed all work. The AI assistance is
+disclosed in the interest of transparency.

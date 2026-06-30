@@ -1,0 +1,1 @@
+6787b06ba69ed8cdfcc7efded1a43cfd535bad6bc6ea07499b133baa2c1b9207  roms_handler.py (RomM 4.9.2)
