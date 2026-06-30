@@ -135,6 +135,18 @@ podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 
 This re-generates the patch against the new RomM version and updates `known_sha256.txt`.
 
+### Removing old versions
+
+Every refresh appends an entry to `known_sha256.txt` and a file to `overrides/prepatched/`, so that list only grows as RomM is updated over time. Trim it with:
+
+```sh
+python3 scripts/prune_versions.py list
+python3 scripts/prune_versions.py remove 4.9.0 4.9.1       # by version, filename, or SHA prefix
+python3 scripts/prune_versions.py keep-latest 3            # keep only the N most recently recorded
+```
+
+Removing a version doesn't break anything — `start.sh` just falls back to tier-2 (the diff patch) for that version's SHA instead of the tier-1 exact match, same as for any version that was never recorded. Add `--dry-run` to preview, or `--purge` to delete the old pre-patched files outright instead of moving them to `overrides/prepatched/.removed/` (the default, reversible behavior). `known_sha256.txt` is backed up before every change. Pass `--dir /opt/romm/fast-scan-plugin` to prune a deployed plugin directory instead of the repo checkout.
+
 ---
 
 ## Fallback behaviour
@@ -196,7 +208,8 @@ romm-fast-scan/
 │   ├── patch_romm_yaml.py        Patches your romm.yml in-place (with backup)
 │   ├── unpatch_romm_yaml.py      Reverts romm.yml to stock (with backup)
 │   ├── build-image.sh            Container image builder helper
-│   └── refresh.sh                Re-generates patch after a RomM update
+│   ├── refresh.sh                Re-generates patch after a RomM update
+│   └── prune_versions.py         Removes old recorded RomM versions
 │
 ├── examples/                    Example configurations
 │   └── romm.patched.example.yml Example of a fully patched pod YAML

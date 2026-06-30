@@ -7,6 +7,10 @@
 #
 # Usage (from the host):
 #   podman exec <romm-app-container-id> sh /romm-plugin/refresh.sh
+#
+# Every run here appends to known_sha256.txt / overrides/prepatched/ and
+# never removes old entries. To clean up versions you no longer need, see
+# scripts/prune_versions.py (run on the host, not in the container).
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
