@@ -113,17 +113,36 @@ static int hs_hexdigest(const HashState *hs,
         EVP_MD_CTX_free(tmp_sha1);
         return 0;
     }
-    EVP_MD_CTX_copy(tmp_md5,  hs->md5_ctx);
-    EVP_MD_CTX_copy(tmp_sha1, hs->sha1_ctx);
+
+    /* EVP_MD_CTX_copy can fail (allocation failure, digest implementation
+     * that doesn't support duplication, ...). Proceeding to Final on a
+     * context that failed to copy leaves its internal digest state
+     * unbound/partial, and EVP_DigestFinal_ex then dereferences that state
+     * -- a segfault, not a clean error. Bail out via the normal failure
+     * path (-> Python RuntimeError) instead. */
+    if (!EVP_MD_CTX_copy(tmp_md5, hs->md5_ctx) ||
+        !EVP_MD_CTX_copy(tmp_sha1, hs->sha1_ctx)) {
+        EVP_MD_CTX_free(tmp_md5);
+        EVP_MD_CTX_free(tmp_sha1);
+        return 0;
+    }
 
     uint8_t  digest[20];
     unsigned dlen;
 
-    EVP_DigestFinal_ex(tmp_md5, digest, &dlen);
+    if (!EVP_DigestFinal_ex(tmp_md5, digest, &dlen)) {
+        EVP_MD_CTX_free(tmp_md5);
+        EVP_MD_CTX_free(tmp_sha1);
+        return 0;
+    }
     for (int i = 0; i < 16; i++) sprintf(out_md5  + i * 2, "%02x", digest[i]);
     out_md5[32] = '\0';
 
-    EVP_DigestFinal_ex(tmp_sha1, digest, &dlen);
+    if (!EVP_DigestFinal_ex(tmp_sha1, digest, &dlen)) {
+        EVP_MD_CTX_free(tmp_md5);
+        EVP_MD_CTX_free(tmp_sha1);
+        return 0;
+    }
     for (int i = 0; i < 20; i++) sprintf(out_sha1 + i * 2, "%02x", digest[i]);
     out_sha1[40] = '\0';
 
