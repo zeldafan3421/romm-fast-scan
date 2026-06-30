@@ -172,6 +172,22 @@ romm-fast-scan/
 
 ---
 
+## Documentation
+
+Complete documentation is in the [`docs/`](docs/) directory:
+
+- **[docs/BUILD_QUICK_START.md](docs/BUILD_QUICK_START.md)** — Quick build reference (one-liners)
+- **[docs/TESTING.md](docs/TESTING.md)** — Testing procedures, benchmarks, validation
+- **[docs/PRE_DEPLOYMENT_CHECKLIST.md](docs/PRE_DEPLOYMENT_CHECKLIST.md)** — Pre-production readiness checklist
+- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Common issues and solutions
+- **[docs/EDGE_CASES.md](docs/EDGE_CASES.md)** — Edge cases, limitations, and workarounds
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Technical internals, three-tier design, performance
+- **[docs/CONTAINER_BUILD.md](docs/CONTAINER_BUILD.md)** — Building and deploying container images
+- **[docs/CONTAINER_SUMMARY.md](docs/CONTAINER_SUMMARY.md)** — Container design decisions and maintenance
+- **[docs/DOCUMENTATION_SUMMARY.md](docs/DOCUMENTATION_SUMMARY.md)** — Doc index, gaps, improvements
+
+---
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

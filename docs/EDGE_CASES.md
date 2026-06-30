@@ -286,7 +286,7 @@ ls /romm-plugin/src/fast_scan_cache.py
 
 **Behavior:** Workers idle waiting for I/O; effective parallelism is limited by disk throughput, not CPU cores.
 
-**Impact:** Slower than optimal (unnecessary context-switching overhead). See [README.md](README.md) for recommended values by storage type.
+**Impact:** Slower than optimal (unnecessary context-switching overhead). See [README.md](../README.md) for recommended values by storage type.
 
 **Mitigation:** Set `SCAN_WORKERS` appropriately for your storage:
 - HDD: 4–6
