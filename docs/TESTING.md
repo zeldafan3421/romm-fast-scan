@@ -20,7 +20,7 @@ Both are designed to fail safely (fall back to pure Python), but comprehensive t
 # On the host:
 sh install.sh
 # Copy romm.yml and patch it
-python3 patch_romm_yaml.py
+python3 ../scripts/patch_romm_yaml.py
 
 # Restart the pod
 podman pod stop romm-pod && podman pod rm romm-pod

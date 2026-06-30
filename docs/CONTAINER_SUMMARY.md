@@ -18,12 +18,12 @@ Multi-stage build:
 - Sets `ENTRYPOINT` to `/romm-plugin/start.sh` (plugin startup before RomM)
 - No code changes — uses the same patch/start.sh/refresh.sh as the volume-mount approach
 
-### **build-image.sh** (Local build helper)
+### **../scripts/build-image.sh** (Local build helper)
 Simple shell script to build the image locally:
 ```sh
-sh build-image.sh                    # Build for 4.9.2
-sh build-image.sh 5.0.0              # Build for 5.0.0
-sh build-image.sh 4.9.2 ghcr.io/myorg  # Build and push
+sh ../scripts/build-image.sh                    # Build for 4.9.2
+sh ../scripts/build-image.sh 5.0.0              # Build for 5.0.0
+sh ../scripts/build-image.sh 4.9.2 ghcr.io/myorg  # Build and push
 ```
 
 ### **.github/workflows/build-container.yml** (GitHub Actions)
@@ -67,7 +67,7 @@ The container is **reproducible** — building from the same Containerfile + rep
 ```sh
 # Make changes to plugin code
 # Build locally
-sh build-image.sh 4.9.2
+sh ../scripts/build-image.sh 4.9.2
 
 # Test
 podman run -it ... romm:4.9.2-fast-scan
@@ -81,10 +81,10 @@ git push
 ```sh
 # Option 1: Edit Containerfile
 sed -i 's/FROM docker.io\/rommapp\/romm:4.9.2/FROM docker.io\/rommapp\/romm:4.9.3/' Containerfile
-sh build-image.sh 4.9.3
+sh ../scripts/build-image.sh 4.9.3
 
 # Option 2: Use build-arg (no file changes)
-sh build-image.sh 4.9.3
+sh ../scripts/build-image.sh 4.9.3
 
 # If patch doesn't apply:
 # - Image still builds (patch is copied)
@@ -131,7 +131,7 @@ It only adds an **optional** build mechanism for those who want a pre-compiled i
 | File | Purpose | Maintains Code | Notes |
 |---|---|---|---|
 | Containerfile | Multi-stage build spec | No | Fixed format; only BASE_IMAGE changes |
-| build-image.sh | Local build helper | No | Thin wrapper around podman/docker |
+| ../scripts/build-image.sh | Local build helper | No | Thin wrapper around podman/docker |
 | .github/workflows/build-container.yml | Automated build trigger | No | Standard GHA syntax; minimal |
 | CONTAINER_BUILD.md | Documentation | No | Usage guide + comparison table |
 
@@ -155,7 +155,7 @@ Current state:
   Containerfile: FROM docker.io/rommapp/romm:4.9.2
 
 Step 1: Try building with new version
-  sh build-image.sh 5.0.0
+  sh ../scripts/build-image.sh 5.0.0
   
   If it works (patch applies cleanly):
     → Done! The 5.0.0 image is ready
@@ -169,7 +169,7 @@ Step 2: Update Containerfile (optional, for easier builds)
   sed -i 's/FROM .*/FROM docker.io\/rommapp\/romm:5.0.0/' Containerfile
   git add Containerfile && git commit
   
-  Now `sh build-image.sh` (no args) builds for 5.0.0
+  Now `sh ../scripts/build-image.sh` (no args) builds for 5.0.0
 
 Step 3: Push to repo
   git push
@@ -229,7 +229,7 @@ Step 3: Push to repo
 
 ```sh
 # 1. Build locally
-sh build-image.sh 4.9.2
+sh ../scripts/build-image.sh 4.9.2
 
 # 2. Run and test
 podman run -it \
@@ -245,7 +245,7 @@ podman logs -f <container> 2>&1 | grep -i "fast-scan\|plugin"
 # (same procedure as PRE_DEPLOYMENT_CHECKLIST.md)
 
 # 5. If everything works, push to registry
-sh build-image.sh 4.9.2 ghcr.io/your-org
+sh ../scripts/build-image.sh 4.9.2 ghcr.io/your-org
 ```
 
 ---
@@ -253,7 +253,7 @@ sh build-image.sh 4.9.2 ghcr.io/your-org
 ## Summary
 
 - ✅ **Containerfile:** Automated, multi-stage build for RomM + plugin
-- ✅ **build-image.sh:** Simple helper for local builds
+- ✅ **../scripts/build-image.sh:** Simple helper for local builds
 - ✅ **GitHub Actions:** Automated builds on push
 - ✅ **CONTAINER_BUILD.md:** Full documentation
 - ✅ **No code modifications:** Everything is decoupled, backward-compatible

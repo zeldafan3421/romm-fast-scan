@@ -52,7 +52,7 @@ python3 /path/to/patch_romm_yaml.py /home/manager/deployments/romm/romm.yml
 
 2. If already patched, no action needed — the pod YAML is ready.
 
-3. If not patched but has unexpected structure, manually add the plugin configuration. Compare your `romm.yml` against [romm.patched.example.yml](romm.patched.example.yml) and apply the changes shown in the example.
+3. If not patched but has unexpected structure, manually add the plugin configuration. Compare your `romm.yml` against [examples/romm.patched.example.yml](examples/romm.patched.example.yml) and apply the changes shown in the example.
 
 ---
 

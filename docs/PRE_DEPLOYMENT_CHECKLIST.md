@@ -54,7 +54,7 @@ Use this checklist **before deploying the plugin to your production RomM instanc
 
 - [ ] **Patch romm.yml**
   ```sh
-  python3 patch_romm_yaml.py
+  python3 ../scripts/patch_romm_yaml.py
   
   # Verify the patch was applied
   grep -c "/romm-plugin/start.sh" romm.yml

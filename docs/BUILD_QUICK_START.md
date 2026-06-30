@@ -25,8 +25,8 @@ docker buildx build -t romm:4.9.2-fast-scan --load .
 
 ### Using the Helper Script
 ```sh
-sh build-image.sh 4.9.2                    # Local build
-sh build-image.sh 4.9.2 ghcr.io/my-org     # Build + push
+sh ../scripts/build-image.sh 4.9.2                    # Local build
+sh ../scripts/build-image.sh 4.9.2 ghcr.io/my-org     # Build + push
 ```
 
 ---
@@ -90,7 +90,7 @@ image: ghcr.io/your-org/romm:4.9.2-fast-scan
 
 - **Containerfile** — For `podman build` (Podman-native)
 - **Dockerfile** — For `docker build` / `docker buildx` (Docker-native)
-- **build-image.sh** — Helper script (auto-detects podman vs docker)
+- **../scripts/build-image.sh** — Helper script (auto-detects podman vs docker)
 
 Both Containerfile and Dockerfile are identical.
 

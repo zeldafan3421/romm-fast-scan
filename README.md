@@ -37,24 +37,23 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 ```sh
 # On the machine running RomM:
 mkdir -p /opt/romm/fast-scan-plugin/lib
-cp -r src overrides start.sh refresh.sh roms_handler.patch known_sha256.txt \
+cp -r src overrides start.sh roms_handler.patch known_sha256.txt \
       /opt/romm/fast-scan-plugin/
-chmod +x /opt/romm/fast-scan-plugin/start.sh \
-         /opt/romm/fast-scan-plugin/refresh.sh
+chmod +x /opt/romm/fast-scan-plugin/start.sh
 ```
 
-Or run the helper:
+Or run the install helper:
 
 ```sh
-sh install.sh
+sh scripts/install.sh
 ```
 
 ### 2. Patch your pod YAML
 
-Copy `patch_romm_yaml.py` next to your `romm.yml` and run it once:
+Copy `scripts/patch_romm_yaml.py` next to your `romm.yml` and run it once:
 
 ```sh
-python3 patch_romm_yaml.py
+python3 scripts/patch_romm_yaml.py
 ```
 
 This backs up your existing `romm.yml` and adds three things:
@@ -153,21 +152,40 @@ No ROM data is ever at risk.
 
 ```
 romm-fast-scan/
-├── src/
-│   ├── _fasthash.c              C extension: CRC32 + MD5 + SHA1 with GIL release
-│   └── fast_scan_cache.py       Opt-in hash-skip cache (FAST_SCAN_HASH_CACHE)
-├── overrides/
-│   └── prepatched/              Pre-patched handlers, one per known RomM version
-│       ├── 4.9.2.py             (used when container SHA matches 4.9.2)
-│       └── 5.0.0-alpha.2.py     (used when container SHA matches 5.0.0-alpha.2)
-├── lib/                         Compiled .so lands here at runtime (gitignored)
-├── start.sh                     Container entrypoint wrapper
-├── refresh.sh                   Re-generates patch after a RomM update
-├── install.sh                   Host-side setup helper
-├── patch_romm_yaml.py           Patches your romm.yml in-place (with backup)
-├── roms_handler.patch           Minimal unified diff applied at boot
-├── known_sha256.txt             Maps each known roms_handler.py SHA → pre-patched file
-└── romm.patched.example.yml     Example of a fully patched pod YAML
+├── README.md                    Main documentation entry point
+│
+├── Plugin Code:
+│   ├── src/
+│   │   ├── _fasthash.c          C extension: CRC32 + MD5 + SHA1 with GIL release
+│   │   └── fast_scan_cache.py   Opt-in hash-skip cache (FAST_SCAN_HASH_CACHE)
+│   ├── overrides/
+│   │   └── prepatched/          Pre-patched handlers, one per known RomM version
+│   │       ├── 4.9.2.py
+│   │       └── 5.0.0-alpha.2.py
+│   ├── start.sh                 Container entrypoint wrapper (core plugin file)
+│   ├── roms_handler.patch       Minimal unified diff applied at boot
+│   └── known_sha256.txt         Maps each known roms_handler.py SHA → pre-patched file
+│
+├── Container Automation:
+│   ├── Dockerfile               Docker build file
+│   ├── Containerfile            Podman build file
+│   └── .github/workflows/       GitHub Actions CI/CD
+│
+├── scripts/                     Utility scripts
+│   ├── install.sh               Host-side plugin deployment
+│   ├── patch_romm_yaml.py       Patches your romm.yml in-place (with backup)
+│   ├── build-image.sh           Container image builder helper
+│   └── refresh.sh               Re-generates patch after a RomM update
+│
+├── examples/                    Example configurations
+│   └── romm.patched.example.yml Example of a fully patched pod YAML
+│
+├── docs/                        📁 Comprehensive documentation (9 files)
+│
+└── Other:
+    ├── LICENSE                  AGPL-3.0
+    ├── NOTICE                   Derivative work attribution
+    └── lib/                     Compiled .so lands here at runtime (gitignored)
 ```
 
 ---

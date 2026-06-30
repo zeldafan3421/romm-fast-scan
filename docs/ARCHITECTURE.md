@@ -411,6 +411,6 @@ See [TESTING.md](TESTING.md) for detailed instructions.
 | Pre-patched files | `overrides/prepatched/*.py` | Pre-computed handlers for known RomM versions (tier-1 exact-match) |
 | Boot entrypoint | `start.sh` | Compile C extension, patch handler, set PYTHONPATH, start RomM |
 | Refresh tool | `refresh.sh` | Regenerate patch and pre-patched files after RomM update |
-| YAML patcher | `patch_romm_yaml.py` | Add plugin config to user's pod YAML |
+| YAML patcher | `../scripts/patch_romm_yaml.py` | Add plugin config to user's pod YAML |
 | Installer | `install.sh` | Deploy plugin files to host filesystem |
 
