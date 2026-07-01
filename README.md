@@ -10,7 +10,7 @@ Verified against **RomM 4.9.2** and **5.0.0-alpha.2**. Includes tooling to stay 
 
 RomM computes CRC32, MD5, and SHA1 hashes for every ROM file during a scan. The original implementation does this in pure Python, which means the GIL serializes all workers even when `SCAN_WORKERS > 1` — extra workers don't actually run in parallel.
 
-This plugin compiles a small C extension (`_fasthash.c`) inside the container at first boot. The extension:
+This plugin compiles a small C extension (`_fasthash.c`) — either baked into a prebuilt image at build time, or inside the container on first boot if you volume-mount it onto the stock image instead. The extension:
 
 - Computes all three hashes in a **single file pass** using a 256 KB read buffer
 - Calls `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` to **release the GIL** during I/O and hashing
@@ -24,13 +24,57 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 
 ## Requirements
 
-- RomM deployed via Podman pod YAML (Kubernetes-style)
-- The container must have internet access on first boot (to `apk add gcc`)
-- Python 3.13 (the version RomM 4.9.2 ships)
+- RomM deployed via Podman (or Docker) pod YAML (Kubernetes-style)
+- If building your own image: `podman` or `docker` on the machine you build from (not necessarily the RomM host — you can build elsewhere and push)
+- If volume-mounting onto the stock image instead (see [Advanced install](#advanced-install-keep-the-stock-image) below): the container needs internet access on first boot, to install a compiler
 
 ---
 
 ## Installation
+
+The plugin is a container image swap: change one line in your existing `romm.yml`, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships the C extension precompiled instead of compiling it on first boot.
+
+### Option A: use the published image
+
+```diff
+-      image: docker.io/rommapp/romm:4.9.2
++      image: ghcr.io/zeldafan3421/romm-fast-scan:4.9.2-fast-scan
+```
+
+That's the entire change. No `command:` override, no `PYTHONPATH` env var, no volume mount — all of that is already baked into the image. The image is built by [this repo's GitHub Actions workflow](.github/workflows/build-container.yml) directly from the same source in this repo, not hand-pushed — if you'd rather verify that yourself or not depend on it, use Option B.
+
+Restart the pod:
+
+```sh
+podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
+```
+
+### Option B: build it yourself
+
+If you'd rather not run an image you didn't build:
+
+```sh
+sh scripts/build-image.sh          # builds romm:4.9.2-fast-scan locally
+```
+
+Then point `image:` at the local tag (`localhost/romm:4.9.2-fast-scan`) instead of the ghcr.io one, and restart the same way. `scripts/build-image.sh <version> <registry>` also builds for other RomM versions and can push to your own registry — see the script's usage comment.
+
+Either option: on first boot you'll see
+
+```
+[fast-scan] Cached: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so
+[fast-scan] Installed roms_handler.py (exact match: 4.9.2.py)
+[fast-scan] PYTHONPATH=/romm-plugin/lib:/romm-plugin/src:/backend
+[fast-scan] Starting RomM...
+```
+
+`Cached:` (not `Compiling:`) confirms the extension came precompiled with the image — there's no build step at container startup.
+
+---
+
+## Advanced install: keep the stock image
+
+Use this instead of Option A/B if you want to keep running `docker.io/rommapp/romm:latest` directly — e.g. to auto-track upstream releases without picking a fast-scan-tagged image, or because policy requires the official image. This volume-mounts the plugin onto the stock image; the C extension compiles inside the container on first boot instead of at image-build time.
 
 ### 1. Deploy plugin files to your server
 
@@ -120,7 +164,11 @@ On each boot `start.sh` patches `roms_handler.py` using a three-tier strategy:
 2. **Patch applies** — if the SHA doesn't match, try applying `roms_handler.patch` (survives minor upstream changes — e.g. it already applies cleanly to 5.0.0-alpha.2, whose changes don't touch the hashing path)
 3. **Graceful fallback** — if neither works, log a warning and start RomM normally with pure-Python hashing
 
-When you see this warning after a `docker pull`:
+**If you're on the volume-mount (advanced) install**, this runs fresh against whatever image tag you're currently running, so pulling a new `rommapp/romm` tag just works — you'll see the warning below if that version is new enough to miss both tier-1 and tier-2.
+
+**If you're on a prebuilt image** (Option A/B), the RomM version is fixed by whichever image tag you deployed. To move to a newer RomM release, pull/build the matching fast-scan-tagged image and swap `image:` again — same one-line change as installing. The published ghcr.io image is rebuilt automatically on every push to this repo's `main` branch (see `.github/workflows/build-container.yml`), so `4.9.2-fast-scan` always reflects the latest plugin fixes for that RomM version; it does not itself track new RomM *versions* until this repo's Containerfile is updated to build against them.
+
+When you see this warning after a `docker pull` (or when the image build hits a RomM version this hasn't been refreshed against yet):
 
 ```
 [fast-scan] WARNING: Could not patch roms_handler.py.
@@ -133,7 +181,7 @@ podman exec <container-id> sh /romm-plugin/refresh.sh
 podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 ```
 
-This re-generates the patch against the new RomM version and updates `known_sha256.txt`.
+This re-generates the patch against the new RomM version and updates `known_sha256.txt`. If you're building your own image (Option B), copy the regenerated `roms_handler.patch`/`known_sha256.txt`/`overrides/prepatched/` back out of the container into this repo and rebuild — see `refresh.sh`'s output for the exact files it touched.
 
 ### Removing old versions
 
@@ -153,7 +201,7 @@ Removing a version doesn't break anything — `start.sh` just falls back to tier
 
 If anything goes wrong, RomM still starts normally:
 
-- If `gcc` is unavailable and `_fasthash.so` isn't cached → pure Python hashing
+- Volume-mount install: if `gcc` is unavailable and `_fasthash.so` isn't cached → pure Python hashing. Prebuilt images (Option A/B) never hit this — the extension is already compiled into the image.
 - If the patch fails to apply → stock `roms_handler.py`, no fast path
 - If `_fasthash` raises an exception at import or call time → falls back to Python per-file
 
@@ -162,6 +210,19 @@ No ROM data is ever at risk.
 ---
 
 ## Uninstallation
+
+**If you installed via Option A/B (image swap):** change `image:` back to the stock tag and restart — the exact inverse of installing, no scripts involved:
+
+```diff
+-      image: ghcr.io/zeldafan3421/romm-fast-scan:4.9.2-fast-scan
++      image: docker.io/rommapp/romm:4.9.2
+```
+
+```sh
+podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
+```
+
+**If you installed via the volume-mount (advanced) path:**
 
 ```sh
 sh scripts/uninstall.sh /opt/romm/fast-scan-plugin /path/to/romm.yml
@@ -173,9 +234,9 @@ This:
 - Deletes the plugin directory from the host
 - Leaves your ROM library, RomM's database, and any `romm.yml.bak.*` backups untouched
 
-Hashes already computed by the C extension are ordinary CRC32/MD5/SHA1 values — RomM doesn't know or care they came from the plugin, so nothing needs to be re-scanned after uninstalling.
-
 Omit the `romm.yml` argument to only remove the plugin directory and leave your pod YAML as-is (you'll see a reminder with the command to run later). To revert just the YAML without touching the plugin directory, run `python3 scripts/unpatch_romm_yaml.py /path/to/romm.yml` directly.
+
+**Either way:** hashes already computed by the C extension are ordinary CRC32/MD5/SHA1 values — RomM doesn't know or care they came from the plugin, so nothing needs to be re-scanned after uninstalling.
 
 ---
 
