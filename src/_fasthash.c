@@ -22,6 +22,20 @@
  *     .update_buffer(data: bytes) -> (crc32_hex, md5_hex, sha1_hex)  per-buffer
  *     .finalize()                 -> (crc32_hex, md5_hex, sha1_hex)  combined
  *
+ * Thread safety
+ * -------------
+ * hash_file() and hash_buffer() touch no state beyond their own arguments and
+ * a stack-local accumulator, so concurrent calls from different threads (the
+ * intended usage -- one call per SCAN_WORKERS thread) never share memory and
+ * are safe with no locking.
+ *
+ * A single MultiFileHasher instance's accumulated state is protected by a
+ * per-instance lock, so calling hash_file()/update_buffer()/finalize() on
+ * the *same* instance from multiple threads at once is safe (calls
+ * serialize) rather than racing. Different instances remain fully
+ * independent and never contend with each other or with hash_file()/
+ * hash_buffer().
+ *
  * Build
  * -----
  *   python setup_fasthash.py build_ext --inplace
@@ -271,9 +285,23 @@ static PyObject *py_hash_buffer(PyObject *self, PyObject *args)
  * MultiFileHasher – Python type
  * ══════════════════════════════════════════════════════════════════════════════ */
 
+/* `accum` is mutable state shared by every method call on a given instance.
+ * hash_file()/update_buffer() mutate it (crc, EVP_MD_CTX buffers) with the
+ * GIL released, and finalize() reads it via EVP_MD_CTX_copy. Two threads
+ * calling methods on the *same instance* concurrently -- e.g. two
+ * asyncio.to_thread() calls sharing one hasher, or hash_file() racing
+ * finalize() -- would race on `accum` with the GIL providing no protection
+ * (it's released for exactly the work that touches accum). `lock` makes
+ * that safe by serializing accum access per-instance: callers block instead
+ * of corrupting state, while unrelated instances and the plain module-level
+ * hash_file()/hash_buffer() (which never touch a shared HashState) are
+ * unaffected and keep running fully in parallel. Confirmed via ThreadSanitizer
+ * that concurrent hash_file() calls on one instance raced on this field
+ * before this lock was added, and that the module-level functions do not. */
 typedef struct {
     PyObject_HEAD
     HashState accum;
+    PyThread_type_lock lock;
 } MultiFileHasher;
 
 static int MFH_tp_init(MultiFileHasher *self, PyObject *args, PyObject *kw)
@@ -282,12 +310,19 @@ static int MFH_tp_init(MultiFileHasher *self, PyObject *args, PyObject *kw)
         PyErr_SetString(PyExc_RuntimeError, "MultiFileHasher: context init failed");
         return -1;
     }
+    self->lock = PyThread_allocate_lock();
+    if (!self->lock) {
+        hs_free(&self->accum);
+        PyErr_SetString(PyExc_RuntimeError, "MultiFileHasher: lock allocation failed");
+        return -1;
+    }
     return 0;
 }
 
 static void MFH_tp_dealloc(MultiFileHasher *self)
 {
     hs_free(&self->accum);
+    if (self->lock) PyThread_free_lock(self->lock);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -310,8 +345,18 @@ static PyObject *MFH_hash_file(MultiFileHasher *self, PyObject *args)
 
     ReadArgs a = { path, &hs_file, &self->accum, buf, 1, 0 };
 
+    /* hs_file is private to this call -- only accum needs the lock. But
+     * read_and_hash updates both from the same fread loop, and the file
+     * read itself dominates the cost anyway, so we hold the lock for the
+     * whole no-GIL section rather than split it per-chunk. The lock is
+     * acquired *after* releasing the GIL and released *before* reacquiring
+     * it, so a thread blocked here never holds the GIL while waiting --
+     * it can't stall unrelated Python threads or deadlock against a
+     * concurrent finalize() (see MFH_finalize). */
     Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
     read_and_hash(&a);
+    PyThread_release_lock(self->lock);
     Py_END_ALLOW_THREADS
 
     free(buf);
@@ -346,6 +391,7 @@ static PyObject *MFH_update_buffer(MultiFileHasher *self, PyObject *args)
     Py_ssize_t     len  = view.len;
 
     Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
     for (Py_ssize_t off = 0; off < len; ) {
         size_t chunk = (size_t)(len - off);
         if (chunk > BUF_SIZE) chunk = BUF_SIZE;
@@ -353,6 +399,7 @@ static PyObject *MFH_update_buffer(MultiFileHasher *self, PyObject *args)
         hs_update(&self->accum, data + off, chunk);
         off += (Py_ssize_t)chunk;
     }
+    PyThread_release_lock(self->lock);
     Py_END_ALLOW_THREADS
 
     PyBuffer_Release(&view);
@@ -362,10 +409,20 @@ static PyObject *MFH_update_buffer(MultiFileHasher *self, PyObject *args)
 }
 
 /* finalize() -> (crc_hex, md5_hex, sha1_hex)
- * Returns the combined hash of all files/buffers passed so far. */
+ * Returns the combined hash of all files/buffers passed so far.
+ * Takes the same per-instance lock as hash_file()/update_buffer() before
+ * reading accum, so a finalize() that lands mid-update on another thread
+ * blocks for that update instead of copying inconsistent digest state. */
 static PyObject *MFH_finalize(MultiFileHasher *self, PyObject *_unused)
 {
-    return hs_to_tuple(&self->accum);
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    Py_END_ALLOW_THREADS
+
+    PyObject *r = hs_to_tuple(&self->accum);
+
+    PyThread_release_lock(self->lock);
+    return r;
 }
 
 static PyMethodDef MFH_methods[] = {
