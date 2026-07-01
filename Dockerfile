@@ -19,53 +19,57 @@
 #   # ... rest of your custom config ...
 #
 # Notes:
-#   • This Containerfile is versioned to RomM 4.9.2 (see ARG BASE_IMAGE below)
-#   • To support a new RomM version, build from that version and run refresh.sh
-#   • The plugin files are always applied; no fallback to stock RomM
-#   • For a version-agnostic image that handles multiple RomM versions,
-#     see the multi-stage build example below (commented out)
+#   • Defaults to RomM 4.9.2; override with --build-arg BASE_IMAGE=... to
+#     build against a different RomM tag (see BASE_IMAGE below)
+#   • The builder stage is BASE_IMAGE itself (not a generic alpine:latest),
+#     so the compiled .so is always built for BASE_IMAGE's actual Python --
+#     no EXT_SUFFIX mismatch, no runtime recompile needed
+#   • If the patch no longer applies to BASE_IMAGE's roms_handler.py, the
+#     image still builds; start.sh falls back to pure Python at runtime.
+#     Run refresh.sh inside a running container to regenerate the patch,
+#     then rebuild
+#   • The plugin files are always applied; no fallback to a stock,
+#     un-patched RomM image -- if you want that, use the volume-mount
+#     install instead of a prebuilt image (see README)
 
-# Build stage: compile the C extension in isolation
-FROM alpine:latest AS builder
+ARG BASE_IMAGE=docker.io/rommapp/romm:4.9.2
+
+# Build stage: compile the C extension against the *exact same image* that
+# will run it (not a generic alpine:latest). The compiled .so's filename is
+# tied to the builder's Python ABI (e.g. cpython-313-x86_64-linux-musl.so),
+# and RomM's image doesn't necessarily track Alpine's default python3
+# package version/build -- pinning the builder to alpine:latest silently
+# produced a .so for the wrong Python, which start.sh then had to discard
+# and recompile at runtime every boot anyway, defeating the point of
+# pre-compiling at build time. Building FROM the target image guarantees a
+# match by construction, regardless of how that image gets its Python.
+FROM ${BASE_IMAGE} AS builder
 
 RUN apk add --no-cache \
-    python3 python3-dev \
+    python3-dev \
     gcc musl-dev \
     openssl-dev zlib-dev
 
 WORKDIR /build
 COPY src/ /build/src/
 
-RUN python3 << 'PYEOF'
-import sysconfig
-import subprocess
-import os
-
-# Determine the EXT_SUFFIX (e.g., cpython-313-x86_64-linux-musl.so)
-ext_suffix = sysconfig.get_config_var('EXT_SUFFIX')
-include_path = sysconfig.get_path('include')
-
-print(f"EXT_SUFFIX: {ext_suffix}")
-print(f"Include path: {include_path}")
-
-# Compile the C extension
-result = subprocess.run([
-    'gcc', '-O2', '-std=c99', '-Wall', '-fPIC', '-shared',
-    '-o', f'_fasthash{ext_suffix}',
-    'src/_fasthash.c',
-    f'-I{include_path}',
-    '-lssl', '-lcrypto', '-lz'
-], capture_output=True, text=True)
-
-if result.returncode != 0:
-    print(f"Compilation failed:\n{result.stderr}")
-    exit(1)
-
-print(f"Built: _fasthash{ext_suffix}")
-PYEOF
+# Plain shell rather than a Python heredoc: `RUN <<EOF` blocks need a
+# BuildKit-compatible frontend (a `# syntax=` directive, or Docker Buildx),
+# and podman/buildah's default parser doesn't support them out of the box.
+# This mirrors start.sh's compile_extension() at runtime.
+RUN EXT_SUFFIX=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))") && \
+    INC=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))") && \
+    echo "EXT_SUFFIX: $EXT_SUFFIX" && \
+    echo "Include path: $INC" && \
+    gcc -O2 -std=c99 -Wall -fPIC -shared \
+        -o "_fasthash${EXT_SUFFIX}" \
+        src/_fasthash.c \
+        -I"$INC" \
+        -lssl -lcrypto -lz && \
+    echo "Built: _fasthash${EXT_SUFFIX}"
 
 # Stage 2: Final RomM image with plugin
-FROM docker.io/rommapp/romm:4.9.2
+FROM ${BASE_IMAGE}
 
 # Install runtime dependencies for the C extension
 RUN apk add --no-cache openssl-dev zlib-dev
@@ -84,7 +88,6 @@ COPY known_sha256.txt /romm-plugin/
 COPY start.sh /romm-plugin/start.sh
 COPY scripts/refresh.sh /romm-plugin/refresh.sh
 
-
 # Make scripts executable
 RUN chmod +x /romm-plugin/start.sh /romm-plugin/refresh.sh
 
@@ -93,50 +96,16 @@ RUN chmod +x /romm-plugin/start.sh /romm-plugin/refresh.sh
 ENTRYPOINT ["/romm-plugin/start.sh"]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Multi-Version Example (Advanced)
+# Building for a different RomM version
 # ───────────────────────────────────────────────────────────────────────────────
-#
-# To build for multiple RomM versions, you can use build args:
-#
-#   ARG BASE_IMAGE=docker.io/rommapp/romm:4.9.2
-#   FROM ${BASE_IMAGE}
-#
-# Then build with:
 #
 #   podman build --build-arg BASE_IMAGE=docker.io/rommapp/romm:5.0.0 \
 #     -t romm:5.0.0-fast-scan .
 #
-# However, the C extension binary is compiled for the builder's Python version,
-# so you'll get the best results if the base image uses the same Python version
-# (all RomM 4.x use Python 3.13 as of this writing).
+# (scripts/build-image.sh wraps this: `sh scripts/build-image.sh 5.0.0`)
 #
-# If you try to use a pre-compiled .so from a different Python version,
-# start.sh will detect the mismatch and recompile at runtime.
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Notes for Future Maintenance
-# ───────────────────────────────────────────────────────────────────────────────
-#
-# 1. When RomM releases a new version (e.g., 5.0.0):
-#    - Update "FROM docker.io/rommapp/romm:4.9.2" to the new version
-#    - Test the build: podman build -t romm:5.0.0-fast-scan .
-#    - The C extension will recompile for that version's Python
-#
-# 2. If the patch no longer applies (unlikely; it's resilient):
-#    - The Containerfile will still apply it at build time (no image change)
-#    - At runtime, start.sh will use tier-1 (exact SHA match)
-#    - If that fails, it falls back to tier-2 (apply the patch)
-#    - If that fails, it falls back to tier-3 (pure Python)
-#    - So the image degrades gracefully and doesn't break
-#
-# 3. To update for a future RomM version after the patch needs regeneration:
-#    - Build the image with the new RomM version
-#    - The image will include the old patch (may not apply)
-#    - At runtime, start.sh will try the patch (falls back to pure Python if needed)
-#    - Run `podman exec <container> sh /romm-plugin/refresh.sh` to regenerate
-#    - Commit the new patch back to the repo
-#    - Rebuild the image with the new patch
-#
-# 4. This Containerfile always applies the plugin (no fallback to stock RomM):
-#    - If you want a fallback option, mount the plugin as a volume instead
-#    - Then use the stock RomM image with the normal pod YAML + patch_romm_yaml.py
+# This always applies the plugin at build time -- there's no fallback to an
+# unpatched image. If that's not what you want (e.g. you want to keep
+# tracking docker.io/rommapp/romm:latest and get the plugin patched in
+# dynamically at each boot instead of pinning to a build), use the
+# volume-mount install path instead -- see README.md.

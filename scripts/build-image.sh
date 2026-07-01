@@ -10,6 +10,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 VERSION="${1:-4.9.2}"
 REGISTRY="${2:-}"
 IMAGE_NAME="romm"
@@ -44,13 +45,13 @@ fi
 if [ "$VERSION" != "4.9.2" ]; then
     echo "Using custom base image: docker.io/rommapp/romm:$VERSION"
     $BUILDER build \
-        -f "$BUILD_FILE" \
+        -f "$REPO_ROOT/$BUILD_FILE" \
         --build-arg "BASE_IMAGE=docker.io/rommapp/romm:$VERSION" \
         -t "$TAG" \
-        "$SCRIPT_DIR"
+        "$REPO_ROOT"
 else
     echo "Using default base image: docker.io/rommapp/romm:4.9.2"
-    $BUILDER build -f "$BUILD_FILE" -t "$TAG" "$SCRIPT_DIR"
+    $BUILDER build -f "$REPO_ROOT/$BUILD_FILE" -t "$TAG" "$REPO_ROOT"
 fi
 
 echo ""
