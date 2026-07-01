@@ -34,6 +34,8 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 
 The plugin is a container image swap: change one line in your existing `romm.yml`, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships the C extension precompiled instead of compiling it on first boot.
 
+**Starting from scratch (no `romm.yml` yet)?** Copy [`examples/romm.release.yml`](examples/romm.release.yml) as your `romm.yml`, fill in the `# <-- change this` paths and secrets, and deploy it directly — it already points at the published image, no further changes needed. The rest of this section is for swapping an *existing* deployment over.
+
 ### Option A: use the published image
 
 ```diff
@@ -277,7 +279,8 @@ romm-fast-scan/
 │   └── prune_versions.py         Removes old recorded RomM versions
 │
 ├── examples/                    Example configurations
-│   └── romm.patched.example.yml Example of a fully patched pod YAML
+│   ├── romm.release.yml         Ready-to-deploy pod YAML (Option A/B image swap)
+│   └── romm.patched.example.yml Illustrative volume-mount result (Advanced install)
 │
 └── Other:
     ├── LICENSE                  AGPL-3.0

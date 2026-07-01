@@ -1,0 +1,123 @@
+# romm-fast-scan — ready-to-deploy release pod YAML
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Uses the prebuilt ghcr.io/zeldafan3421/romm-fast-scan image, which already
+# has the plugin baked in — see README.md, "Option A: use the published
+# image". No command override, no PYTHONPATH, no extra volume mount needed;
+# that's all inside the image already. To go back to stock RomM, change the
+# image: line below to docker.io/rommapp/romm:4.9.2 and restart — nothing
+# else in this file needs to change.
+#
+# If you're on a RomM version without a published fast-scan image yet, this
+# file isn't for you — see "Advanced install: volume mount" in README.md
+# instead.
+#
+# Before deploying:
+#   1. Replace every "# <-- change this" path below with real host paths.
+#   2. Generate real secrets (three DIFFERENT values, not the same one
+#      copy-pasted three times):
+#        openssl rand -hex 32
+#      ROMM_AUTH_SECRET_KEY, MARIADB_ROOT_PASSWORD, and the
+#      DB_PASSWD/MARIADB_PASSWORD pair (those two must match each other,
+#      but not the other two secrets) below all need one.
+#   3. podman play kube romm.yml
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: romm-pod
+  labels:
+    app: romm
+spec:
+  containers:
+    - name: romm-app
+      image: ghcr.io/zeldafan3421/romm-fast-scan:4.9.2-fast-scan
+      restartPolicy: Always
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+      env:
+        - name: USER_ID
+          value: "1000"
+        - name: GROUP_ID
+          value: "1000"
+        - name: TZ
+          value: UTC
+        - name: DB_HOST
+          value: "127.0.0.1"
+        - name: DB_NAME
+          value: romm
+        - name: DB_USER
+          value: romm-user
+        - name: DB_PASSWD
+          value: changeme-db-generate-with-openssl-rand-hex-32   # <-- change this; must match MARIADB_PASSWORD below
+        - name: ROMM_AUTH_SECRET_KEY
+          value: changeme-auth-generate-with-openssl-rand-hex-32 # <-- change this; must NOT match either password
+        - name: SCAN_WORKERS
+          value: "4"   # HDD: 4-6, SATA SSD: 8-12, NVMe: 12-16 -- see README "Configuration"
+        # Reuse stored hashes for files whose size+mtime are unchanged on
+        # Complete / Rescan-hashes scans. Off by default; see README.
+        # - name: FAST_SCAN_HASH_CACHE
+        #   value: "1"
+
+      volumeMounts:
+        - name: library-folder
+          mountPath: "/romm/library"
+          readOnly: true
+        - name: romm-resources
+          mountPath: "/romm/resources"
+        - name: romm-redis
+          mountPath: "/redis-data"
+        - name: romm-assets
+          mountPath: "/romm/assets"
+        - name: romm-config
+          mountPath: "/romm/config"
+
+    - name: romm-db
+      image: docker.io/mariadb:latest
+      env:
+        - name: MARIADB_ROOT_PASSWORD
+          value: changeme-root-generate-with-openssl-rand-hex-32 # <-- change this; must NOT match either value above
+        - name: MARIADB_DATABASE
+          value: romm
+        - name: MARIADB_USER
+          value: romm-user
+        - name: MARIADB_PASSWORD
+          value: changeme-db-generate-with-openssl-rand-hex-32   # <-- change this; must match DB_PASSWD above
+      volumeMounts:
+        - name: mysql_data
+          mountPath: "/var/lib/mysql"
+      startupProbe:
+        exec:
+          command:
+            - healthcheck.sh
+            - --connect
+            - --innodb_initialized
+        initialDelaySeconds: 0
+        periodSeconds: 10
+        failureThreshold: 3
+
+  volumes:
+    - name: library-folder
+      hostPath:
+        path: /your/games/library        # <-- change this
+        type: Directory
+    - name: romm-resources
+      hostPath:
+        path: /your/romm/data/resources  # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-redis
+      hostPath:
+        path: /your/romm/data/redis-data # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-assets
+      hostPath:
+        path: /your/romm/data/assets     # <-- change this
+        type: DirectoryOrCreate
+    - name: romm-config
+      hostPath:
+        path: /your/romm/config          # <-- change this
+        type: DirectoryOrCreate
+    - name: mysql_data
+      persistentVolumeClaim:
+        claimName: rommdb-data

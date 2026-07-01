@@ -7,3 +7,4 @@ __pycache__/
 romm.yml
 romm.*.yml
 !romm.patched.example.yml
+!romm.release.yml
