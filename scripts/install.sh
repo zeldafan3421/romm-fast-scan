@@ -1,7 +1,14 @@
 #!/bin/sh
 # scripts/install.sh
-# Run this ONCE on the host to deploy the plugin.
+# Run this ONCE on the host to deploy the plugin (volume-mount method).
 # Usage:  sh scripts/install.sh [/path/to/dest]
+#
+# DEPRECATED for RomM versions that already have a published fast-scan
+# image (currently 4.9.2) -- see README.md for the one-line `image:` swap,
+# which needs none of this. This script stays the right tool for RomM
+# versions without a published image yet; patch_romm_yaml.py (the next
+# step) checks the target version and blocks with a pointer to the image
+# swap if one already exists for it, so you'll be told either way.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
@@ -10,7 +17,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 DEST="${1:-/opt/romm/fast-scan-plugin}"
 
-echo "=== romm-fast-scan plugin installer ==="
+echo "=== romm-fast-scan plugin installer (volume-mount method) ==="
+echo ""
+echo "NOTE: if your RomM version already has a published fast-scan image,"
+echo "the one-line 'image:' swap in README.md is simpler and recommended"
+echo "instead of this. patch_romm_yaml.py (step 2 below) will check and"
+echo "tell you if that's the case for your version."
 echo ""
 
 # ── 1. Copy plugin files to the service data directory ───────────────────────

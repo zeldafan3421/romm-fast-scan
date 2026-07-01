@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-patch_romm_yaml.py  —  romm fast-scan plugin installer
-───────────────────────────────────────────────────────
+patch_romm_yaml.py  —  romm fast-scan plugin installer (volume-mount method)
+──────────────────────────────────────────────────────────────────────────
+DEPRECATED for RomM versions that already have a published fast-scan image
+(see SUPPORTED_IMAGE_VERSIONS below) -- use the one-line image swap in
+README.md instead. This script remains the recommended path for RomM
+versions that don't have a published image yet, e.g. right after a new
+RomM release before this repo has caught up; for those it runs normally
+with no warning.
+
 Drop this file next to your romm.yml and run it once:
 
     python3 patch_romm_yaml.py [romm.yml]
@@ -18,8 +25,22 @@ wherever you copied the plugin files.
 
 import sys
 import os
+import re
 import shutil
 import datetime
+
+# ── Deprecation guard ─────────────────────────────────────────────────────────
+# Strip --allow-deprecated out before any positional argv parsing below, so
+# it can appear anywhere on the command line.
+ALLOW_DEPRECATED = "--allow-deprecated" in sys.argv
+if ALLOW_DEPRECATED:
+    sys.argv = [a for a in sys.argv if a != "--allow-deprecated"]
+
+# RomM versions with a published ghcr.io/zeldafan3421/romm-fast-scan image.
+# Deliberately separate from known_sha256.txt (which tracks versions with
+# prepatched *source*, a broader set) -- keep this in sync with the tags
+# .github/workflows/build-container.yml actually publishes.
+SUPPORTED_IMAGE_VERSIONS = {"4.9.2"}
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +52,42 @@ PLUGIN_HOST_PATH = sys.argv[2] if len(sys.argv) > 2 else "/opt/romm/fast-scan-pl
 
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+def detect_romm_version(text):
+    """Best-effort extraction of the romm-app container's image tag.
+    Returns None if it can't be determined unambiguously -- e.g. the image
+    was already swapped to something custom, or is tracking :latest, which
+    we deliberately don't try to resolve to a concrete version."""
+    m = re.search(r"image:\s*(?:docker\.io/)?rommapp/romm:(\S+)", text)
+    if not m or m.group(1) == "latest":
+        return None
+    return m.group(1)
+
+def warn_if_deprecated(text):
+    version = detect_romm_version(text)
+    if version not in SUPPORTED_IMAGE_VERSIONS:
+        return  # unknown/new version -- this script is still the right tool
+    if ALLOW_DEPRECATED:
+        print(f"NOTE: RomM {version} has a published fast-scan image, but "
+              f"--allow-deprecated was given -- proceeding with the "
+              f"volume-mount install anyway.\n")
+        return
+    print(
+        f"RomM {version} already has a published fast-scan image. The "
+        "volume-mount install\n"
+        "is deprecated for versions that do -- use the one-line image swap "
+        "instead\n"
+        "(see README.md):\n\n"
+        f"    image: ghcr.io/zeldafan3421/romm-fast-scan:{version}-fast-scan\n\n"
+        "This script remains fully supported for RomM versions that don't "
+        "have a\n"
+        "published image yet -- for those it runs normally, no warning.\n\n"
+        "To keep the stock rommapp/romm image anyway (policy, tracking "
+        ":latest,\n"
+        "etc.), rerun with --allow-deprecated.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 def patch(text, old, new, label):
@@ -65,6 +122,8 @@ def main():
     if "/romm-plugin/start.sh" in original:
         print("romm.yml already contains the fast-scan plugin patch — nothing to do.")
         sys.exit(0)
+
+    warn_if_deprecated(original)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = f"{target}.bak.{ts}"

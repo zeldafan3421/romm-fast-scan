@@ -26,7 +26,7 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 
 - RomM deployed via Podman (or Docker) pod YAML (Kubernetes-style)
 - If building your own image: `podman` or `docker` on the machine you build from (not necessarily the RomM host — you can build elsewhere and push)
-- If volume-mounting onto the stock image instead (see [Advanced install](#advanced-install-keep-the-stock-image) below): the container needs internet access on first boot, to install a compiler
+- If volume-mounting onto the stock image instead (see [Advanced install](#advanced-install-volume-mount-deprecated-for-supported-versions) below — the go-to path only for RomM versions without a published image yet): the container needs internet access on first boot, to install a compiler
 
 ---
 
@@ -72,9 +72,13 @@ Either option: on first boot you'll see
 
 ---
 
-## Advanced install: keep the stock image
+## Advanced install: volume mount (deprecated for supported versions)
 
-Use this instead of Option A/B if you want to keep running `docker.io/rommapp/romm:latest` directly — e.g. to auto-track upstream releases without picking a fast-scan-tagged image, or because policy requires the official image. This volume-mounts the plugin onto the stock image; the C extension compiles inside the container on first boot instead of at image-build time.
+**Deprecated for any RomM version that already has a published fast-scan image** — currently just `4.9.2`. For those, use Option A/B above instead; `patch_romm_yaml.py` (step 2 below) checks the target version and refuses to proceed for a supported one, pointing you back at the image swap.
+
+This path stays fully supported, with no warning, as **the go-to way to try the plugin on a RomM version this repo hasn't published an image for yet** — e.g. right after a new RomM release, before someone's built and pushed a matching `X.Y.Z-fast-scan` tag. It's also still available if you specifically want to keep running `docker.io/rommapp/romm:latest` directly (auto-tracking upstream without picking a version-pinned tag) — pass `--allow-deprecated` to `patch_romm_yaml.py` if you're doing that against a supported version; tracking `:latest` itself is never blocked, since the version can't be determined ahead of time.
+
+Unlike Option A/B, this volume-mounts the plugin onto the stock image, so the C extension compiles inside the container on first boot instead of at image-build time — and if the version turns out to be new enough that the committed patch doesn't apply cleanly, it's the same `refresh.sh` workflow (see [Staying up to date with RomM](#staying-up-to-date-with-romm) below) that's used to generate the patch for the next official image in the first place.
 
 ### 1. Deploy plugin files to your server
 
@@ -101,7 +105,7 @@ Copy `scripts/patch_romm_yaml.py` next to your `romm.yml` and run it once:
 python3 scripts/patch_romm_yaml.py
 ```
 
-This backs up your existing `romm.yml` and adds three things:
+It first checks the `image:` tag in your `romm.yml`. If that RomM version already has a published fast-scan image, it stops there and prints the `image:` swap to use instead (pass `--allow-deprecated` to proceed anyway). Otherwise — the expected case for this path — it backs up your existing `romm.yml` and adds three things:
 - `command: ["/romm-plugin/start.sh"]` — runs the plugin before RomM starts
 - `PYTHONPATH=/romm-plugin/lib:/backend` — makes the compiled `.so` importable
 - A `hostPath` volume mount for the plugin directory
