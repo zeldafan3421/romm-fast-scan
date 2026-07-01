@@ -1,0 +1,77 @@
+# romm-fast-scan — docker-compose.yml (image-swap install)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Same deployment as examples/romm.release.yml, in Compose form instead of a
+# Podman/Kubernetes pod YAML. Works with `docker compose` and `podman compose`
+# (or the standalone `podman-compose`) alike.
+#
+# Uses the prebuilt ghcr.io/zeldafan3421/romm-fast-scan image -- no command
+# override, no PYTHONPATH, no extra volume needed; that's all baked into the
+# image already. To go back to stock RomM, change romm-app's image: line to
+# docker.io/rommapp/romm:4.9.2 and restart -- nothing else needs to change.
+#
+# If you're on a RomM version without a published fast-scan image yet, this
+# file isn't for you -- see "Advanced install: volume mount" in README.md.
+#
+# One real difference from the pod YAML: containers in a Kubernetes/Podman
+# Pod share a network namespace, so DB_HOST there is 127.0.0.1. Compose
+# containers are separate, reached over the compose network by service name
+# -- hence DB_HOST: romm-db below, not 127.0.0.1. Don't copy DB_HOST between
+# the two formats.
+#
+# Before deploying:
+#   1. Replace every "# <-- change this" path below with real host paths.
+#   2. Generate real secrets (three DIFFERENT values, not the same one
+#      copy-pasted three times):
+#        openssl rand -hex 32
+#      ROMM_AUTH_SECRET_KEY, MARIADB_ROOT_PASSWORD, and the
+#      DB_PASSWD/MARIADB_PASSWORD pair (those two must match each other,
+#      but not the other two secrets) below all need one.
+#   3. docker compose up -d      (or: podman compose up -d)
+#
+services:
+  romm-app:
+    image: ghcr.io/zeldafan3421/romm-fast-scan:4.9.2-fast-scan
+    restart: unless-stopped
+    depends_on:
+      - romm-db
+    ports:
+      - "8080:8080"
+    environment:
+      USER_ID: "1000"
+      GROUP_ID: "1000"
+      TZ: UTC
+      DB_HOST: romm-db
+      DB_NAME: romm
+      DB_USER: romm-user
+      DB_PASSWD: changeme-db-generate-with-openssl-rand-hex-32   # <-- change this; must match MARIADB_PASSWORD below
+      ROMM_AUTH_SECRET_KEY: changeme-auth-generate-with-openssl-rand-hex-32 # <-- change this; must NOT match either password
+      SCAN_WORKERS: "4"   # HDD: 4-6, SATA SSD: 8-12, NVMe: 12-16 -- see README "Configuration"
+      # Reuse stored hashes for files whose size+mtime are unchanged on
+      # Complete / Rescan-hashes scans. Off by default; see README.
+      # FAST_SCAN_HASH_CACHE: "1"
+    volumes:
+      - /your/games/library:/romm/library:ro           # <-- change this
+      - /your/romm/data/resources:/romm/resources       # <-- change this
+      - /your/romm/data/redis-data:/redis-data           # <-- change this
+      - /your/romm/data/assets:/romm/assets              # <-- change this
+      - /your/romm/config:/romm/config                   # <-- change this
+
+  romm-db:
+    image: docker.io/mariadb:latest
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: changeme-root-generate-with-openssl-rand-hex-32 # <-- change this; must NOT match either value above
+      MARIADB_DATABASE: romm
+      MARIADB_USER: romm-user
+      MARIADB_PASSWORD: changeme-db-generate-with-openssl-rand-hex-32        # <-- change this; must match DB_PASSWD above
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      start_period: 0s
+      retries: 3
+
+volumes:
+  mysql_data:

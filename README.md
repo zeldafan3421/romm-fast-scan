@@ -32,9 +32,18 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 
 ## Installation
 
-The plugin is a container image swap: change one line in your existing `romm.yml`, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships the C extension precompiled instead of compiling it on first boot.
+The plugin is a container image swap: change one line in your existing config, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships the C extension precompiled instead of compiling it on first boot.
 
-**Starting from scratch (no `romm.yml` yet)?** Copy [`examples/romm.release.yml`](examples/romm.release.yml) as your `romm.yml`, fill in the `# <-- change this` paths and secrets, and deploy it directly — it already points at the published image, no further changes needed. The rest of this section is for swapping an *existing* deployment over.
+**Starting from scratch?** Pick whichever deployment style you'd use for RomM anyway — every one of these already points at the published image, ready to fill in and run:
+
+| Style | File |
+|---|---|
+| Podman/Kubernetes pod YAML | [`examples/romm.release.yml`](examples/romm.release.yml) — `podman play kube` |
+| Docker/Podman Compose | [`examples/docker-compose.yml`](examples/docker-compose.yml) — `docker compose up -d` / `podman compose up -d` |
+| Plain `docker run`, no config file | [`scripts/run-docker.sh`](scripts/run-docker.sh) |
+| Plain `podman run`, no config file | [`scripts/run-podman.sh`](scripts/run-podman.sh) |
+
+The rest of this section is for swapping an *existing* pod-YAML deployment over; Option A/B apply the same way if you're on Compose or a bare `run` command — just change the `image:` (or `--image`) reference the same way.
 
 ### Option A: use the published image
 
@@ -275,11 +284,14 @@ romm-fast-scan/
 │   ├── patch_romm_yaml.py        Patches your romm.yml in-place (with backup)
 │   ├── unpatch_romm_yaml.py      Reverts romm.yml to stock (with backup)
 │   ├── build-image.sh            Container image builder helper
+│   ├── run-docker.sh             Run RomM + plugin with plain `docker run`, no config file
+│   ├── run-podman.sh             Run RomM + plugin with plain `podman run`, no config file
 │   ├── refresh.sh                Re-generates patch after a RomM update
 │   └── prune_versions.py         Removes old recorded RomM versions
 │
 ├── examples/                    Example configurations
 │   ├── romm.release.yml         Ready-to-deploy pod YAML (Option A/B image swap)
+│   ├── docker-compose.yml       Ready-to-deploy Compose file (same, Compose form)
 │   └── romm.patched.example.yml Illustrative volume-mount result (Advanced install)
 │
 └── Other:
