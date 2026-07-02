@@ -196,7 +196,18 @@ patch_handler
 # PYTHONPATH the way the old _fasthash.so did) and fast_scan_cache.py (the
 # opt-in FAST_SCAN_HASH_CACHE tier-0 path, unrelated to and unaffected by
 # the plugin system).
-export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-/backend}"
+#
+# Idempotent: skip prepending if $SRC_DIR is already present anywhere in
+# PYTHONPATH. Without this check, a caller that pre-sets PYTHONPATH to
+# include $SRC_DIR (as scripts/patch_romm_yaml.py's pod YAML used to, before
+# this was made unconditional here and that injection was removed as
+# redundant) would end up with it duplicated on every boot -- harmless to
+# Python's import machinery, but confusing in logs and a sign something's
+# not quite right.
+case ":${PYTHONPATH:-}:" in
+    *":$SRC_DIR:"*) : ;;  # already present, don't duplicate
+    *) export PYTHONPATH="$SRC_DIR:${PYTHONPATH:-/backend}" ;;
+esac
 log "PYTHONPATH=$PYTHONPATH"
 
 # ── 4. Hand off to RomM's real entrypoint ───────────────────────────────────

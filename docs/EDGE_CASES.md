@@ -6,13 +6,13 @@ The fast-scan plugin optimizes the common path (single-file ROM scanning with GI
 
 ---
 
-## Hashing Path (C Extension vs Pure Python)
+## Hashing Path (Native Plugin vs Pure Python)
 
 ### Archive Files (`.zip`, `.7z`, `.rar`, etc.)
 
-**Behavior:** Always use pure Python decompression, never the C extension.
+**Behavior:** Always use pure Python decompression, never the native `fasthash` plugin.
 
-**Why:** Archive decompression is format-specific and memory-bound. The C extension only handles raw file I/O + hash updates; decompression libraries (libzip, p7zip) are already in Python. Forcing them through the C extension would be slower, not faster.
+**Why:** Archive decompression is format-specific and memory-bound. `plugin_manager.hash_file()` only handles raw file I/O + hash updates; decompression libraries (libzip, p7zip) are already in Python. Forcing them through the native plugin would be slower, not faster.
 
 **Scope:** Any ROM with an extension in `ARCHIVE_READERS` (checked in `roms_handler.py`).
 
@@ -24,11 +24,11 @@ The fast-scan plugin optimizes the common path (single-file ROM scanning with GI
 
 ### Multi-File ROMs (Multi-Disc, multi-part files)
 
-**Behavior:** The C extension only applies to the *single* file being hashed. For multi-disc ROMs (folder with multiple `.bin`/`.iso` files), each file is hashed individually via the C extension, but the *aggregate* CRC across all files is accumulated in pure Python.
+**Behavior:** `plugin_manager.hash_file()` only applies to the *single* file being hashed. For multi-disc ROMs (folder with multiple `.bin`/`.iso` files), each file is hashed individually via the native plugin, but the *aggregate* CRC across all files is accumulated in pure Python.
 
-**Why:** Multi-file accumulation is stateful (`MultiFileHasher` type in the C code), and building that on the fly is unneeded complexity — most single-file ROMs benefit from the speedup. The per-file reads are still parallelized by `SCAN_WORKERS`.
+**Why:** The `fasthash` plugin does implement a stateful multi-file accumulator behind the `hash_file_accum` hook (`plugin_manager.new_multi_file_accumulator()`, mirroring the old `MultiFileHasher`'s `.hash_file()`/`.finalize()`/`.free()` shape) — it loads and runs correctly, but **it isn't wired into `roms_handler.py`'s scan path today**. This is a documented, intentional gap (see `CLAUDE.md`'s "Roadmap: incremental backend replacement"), not a bug — most single-file ROMs already benefit from the per-file speedup, and the per-file reads are still parallelized by `SCAN_WORKERS`.
 
-**Limitation:** A multi-file ROM with 10 member files will hash via the C extension 10 times (parallelized), but no single pass reads all 10 together.
+**Limitation:** A multi-file ROM with 10 member files will hash via the native plugin 10 times (parallelized), but no single pass reads all 10 together.
 
 **Impact:** Minimal — the bottleneck is I/O, not hashing. 10 parallel reads of individual files is faster than 1 serial read of all 10.
 
@@ -38,13 +38,13 @@ The fast-scan plugin optimizes the common path (single-file ROM scanning with GI
 
 ### CHD Files (Compressed Harmonic Drive)
 
-**Behavior:** Raw CHD files are hashed by the C extension. CHD-specific metadata (SHA1 embedded in the file) is extracted separately via `extract_chd_hash()` and returned in `chd_sha1_hash`.
+**Behavior:** Raw CHD files are hashed via `plugin_manager.hash_file()` (the `fasthash` plugin). CHD-specific metadata (SHA1 embedded in the file) is extracted separately via `extract_chd_hash()` and returned in `chd_sha1_hash`.
 
 **Why:** The embedded SHA1 is a property of the CHD format, not a hash of the file's contents.
 
 **Limitation:** The cache (Tier-0) does not apply to CHD files — they always re-hash. This is because the cache relies on file size + mtime; CHD files often have complex versioning, and a recompressed CHD with identical content may have different size/mtime.
 
-**Impact:** CHD rescans are slower than raw file rescans. If you have a large CHD collection, you may want to run `Rescan hashes` less frequently or disable the C extension and stick with pure Python (negligible difference in speed for CHD).
+**Impact:** CHD rescans are slower than raw file rescans. If you have a large CHD collection, you may want to run `Rescan hashes` less frequently or disable the `fasthash` plugin and stick with pure Python (negligible difference in speed for CHD).
 
 **Test:** Run a scan on a platform with CHD files (e.g., Arcade). Hashes should appear, and the embedded `chd_sha1_hash` should be populated.
 
@@ -52,7 +52,7 @@ The fast-scan plugin optimizes the common path (single-file ROM scanning with GI
 
 ### Firmware Files
 
-**Behavior:** Firmware files are handled like ROMs — hashed by the C extension if they're single files, fallback to Python if needed.
+**Behavior:** Firmware files are handled like ROMs — hashed via `plugin_manager.hash_file()` (the `fasthash` plugin) if they're single files, falling back to Python if needed.
 
 **Limitation:** Firmware files rarely change, so the hash cache (Tier-0) is less valuable for them. But if enabled, unchanged firmware will benefit just like ROMs.
 
@@ -189,10 +189,10 @@ Difference:    > 1e-6  ✓ cache miss (correct)
 
 **Behavior:**
 1. `start.sh` tries the diff (tier-2): fails
-2. Falls back to tier-3: pure Python hashing (no C extension used)
+2. Falls back to tier-3: pure Python hashing (no native plugin used)
 3. Logs a warning: `"WARNING: Could not patch roms_handler.py."`
 
-**Impact:** RomM still starts and scans normally, but at pure-Python speeds (3–5× slower than with the C extension).
+**Impact:** RomM still starts and scans normally, but at pure-Python speeds (3–5× slower than with the native `fasthash` plugin).
 
 **Mitigation:** Run `refresh.sh` inside the container to regenerate the patch and SHAs for the new version:
 ```sh
@@ -230,14 +230,15 @@ podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 
 ## Build & Runtime Issues
 
-### C Extension Fails to Compile
+### Native Plugin Fails to Compile
 
-**Scenario:** `gcc` is unavailable, or OpenSSL/zlib headers are missing.
+**Scenario:** `gcc`/`cc` is unavailable, or OpenSSL/zlib headers are missing (this only applies to the volume-mount install — prebuilt images ship every plugin precompiled, so `compile_plugins()` has nothing to do).
 
 **Behavior:**
-1. `start.sh` tries to compile: `apk add gcc musl-dev openssl-dev zlib-dev`
-2. If install fails, logs: `"Compile failed — using pure Python fallback"`
-3. RomM starts without the C extension
+1. `start.sh`'s `compile_plugins()` tries to install build tools: `apk add gcc musl-dev openssl-dev zlib-dev`
+2. If that install fails, logs: `"Cannot install build tools -- plugins unavailable, using pure Python fallback"`
+3. If build tools are present but compiling a specific plugin fails, logs: `"Compile failed for <plugin> -- that hook falls back to pure Python"`
+4. RomM starts without that native plugin's hook(s)
 
 **Impact:** RomM scans at pure Python speeds (no actual hash errors, just slower).
 
@@ -247,19 +248,32 @@ podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 
 ---
 
-### .so File Corruption
+### .so File Corruption or Failed Verification
 
-**Scenario:** The compiled `.so` file is corrupted or incompatible with the running Python version.
+**Scenario:** A plugin's compiled `.so` is corrupted, or fails one of `plugin_manager.py`'s load-time checks.
 
-**Behavior:** `import _fasthash` fails with a runtime error (e.g., `ELF header mismatch`). The import is wrapped in a try/except, so the handler falls back to Python hashing.
+**Behavior:** `plugin_manager.load_plugins()` `ctypes.CDLL()`-loads each plugin's `.so` and verifies, in order: the `sha256` in `plugin.json` matches the file on disk, the `.so`'s exported `romm_plugin_abi_version()` matches both `plugin.json` and the loader's own supported version, and (by default) a valid signature against `plugins/official-signers.txt`. Any failure — corrupted `.so`, sha256 mismatch, ABI mismatch, or a `dlopen`/`ctypes` load error (e.g. `ELF header mismatch`) — is caught, logged, and that plugin is simply skipped; `plugin_manager.hash_file()` (and the other hooks) then return `None` for any call that would have used it, and the caller falls back to Python hashing.
 
-**Impact:** Safe — RomM continues with pure Python.
+**Impact:** Safe — RomM continues with pure Python for whatever hook the broken plugin provided.
 
-**Mitigation:** Delete the cached `.so` and let `start.sh` recompile:
+**Mitigation:** Delete the cached `.so` (and its stale `plugin.json`) and let `start.sh` recompile it on next boot:
 ```sh
-rm /romm-plugin/lib/_fasthash*.so
+rm /romm-plugin/plugins/fasthash/libfasthash.so /romm-plugin/plugins/fasthash/plugin.json
 podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 ```
+(Prebuilt `ghcr.io` images never hit this — the `.so` is baked into the image, not recompiled at boot.)
+
+---
+
+### Plugin Fails Signature Verification
+
+**Scenario:** `plugin_manager.py` refuses to load a plugin that isn't signed by the official key — this is a distinct failure mode from sha256/corruption above, and it's the default behavior for **any** self-built plugin, including one built from this repo's own unmodified source (only this repo's CI holds the private `PLUGIN_SIGNING_KEY`).
+
+**Behavior:** A missing `.sig` file, missing `official-signers.txt`, missing `ssh-keygen` binary, or a genuinely invalid signature are all treated identically as "not signed." Unlike almost every other check in this project, this one does **not** fail open toward "use it anyway" — it fails toward "don't run this native code" and the plugin is refused outright, logged, and skipped.
+
+**Impact:** That plugin's hook(s) are unavailable; callers fall back to pure Python, same as any other unavailable plugin.
+
+**Mitigation:** If you're on the volume-mount install or built plugins locally with `scripts/build-plugins.sh`, set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` in your pod YAML to opt back into sha256-only verification. Prebuilt `ghcr.io` images are already signed and never need this. See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section for the full mechanism.
 
 ---
 
@@ -267,9 +281,9 @@ podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 
 **Scenario:** `src/fast_scan_cache.py` is missing or not on `PYTHONPATH`.
 
-**Behavior:** The handler's `import fast_scan_cache as _fsc` is wrapped in a try/except, so `_fsc` is `None`. The cache tier-0 check skips (returns `None`), and tier-2 (C extension) or tier-3 (Python) proceeds normally.
+**Behavior:** The handler's `import fast_scan_cache as _fsc` is wrapped in a try/except, so `_fsc` is `None`. The cache tier-0 check skips (returns `None`), and the native-plugin fast path or the pure-Python fallback proceeds normally.
 
-**Impact:** Cache feature is disabled, but fast path (C extension) still works.
+**Impact:** Cache feature is disabled, but the fast path (native `fasthash` plugin) still works.
 
 **Mitigation:** Ensure `install.sh` copied the `src/` directory:
 ```sh
@@ -299,7 +313,7 @@ ls /romm-plugin/src/fast_scan_cache.py
 
 **Scenario:** Only one worker is configured.
 
-**Behavior:** Files are scanned serially. The C extension's GIL release doesn't help (single thread = no parallelism anyway), but it doesn't hurt either.
+**Behavior:** Files are scanned serially. The native plugin having no GIL to hold doesn't help (single thread = no parallelism anyway), but it doesn't hurt either.
 
 **Impact:** Slowest possible scan (but correct). Pure Python would be similar speed.
 
@@ -311,7 +325,7 @@ ls /romm-plugin/src/fast_scan_cache.py
 
 **Scenario:** RomM is configured with `SKIP_HASH_CALCULATION: true` in config.yml.
 
-**Behavior:** The handler's `calculate_hashes` flag is False, so no hashes are computed (C extension is never called).
+**Behavior:** The handler's `calculate_hashes` flag is False, so no hashes are computed (`plugin_manager.hash_file()` is never called).
 
 **Impact:** Scans are very fast (no I/O or hashing), but no hashes are stored. This is a deliberate RomM feature for testing or large libraries where hashes aren't needed.
 
@@ -336,25 +350,31 @@ ls /romm-plugin/src/fast_scan_cache.py
 **Tier-3 (fallback, pure Python):**
 ```
 [fast-scan] WARNING: Could not patch roms_handler.py.
-            RomM has likely updated. The C extension is compiled but
-            hashing falls back to pure Python until you update the plugin.
+[fast-scan]          RomM has likely updated. Any compiled plugins are still there,
+[fast-scan]          but hashing falls back to pure Python until you update the plugin.
 ```
 
 ---
 
-### How to Check if the C Extension Is Being Used
+### How to Check if the Native Plugin Is Being Used
 
 Inside the container:
 ```sh
 python3 -c "
+  import sys
+  sys.path.insert(0, '/romm-plugin/src')
   try:
-    import _fasthash
-    print('C extension imported successfully')
-    # Try hashing a file
-    crc, md5, sha1 = _fasthash.hash_file('/path/to/a/rom.rom')
-    print(f'Hashing works: {len(md5)} char MD5')
+    import plugin_manager as pm
+    pm.load_plugins('/romm-plugin/plugins')
+    print('Loaded hooks:', pm.loaded_hooks())
+    result = pm.hash_file('/path/to/a/rom.rom')
+    if result is None:
+      print('hash_file() returned None — plugin unavailable, Python fallback in effect')
+    else:
+      crc, md5, sha1 = result
+      print(f'Hashing works via plugin: {len(md5)} char MD5')
   except Exception as e:
-    print(f'C extension failed: {e}')
+    print(f'plugin_manager failed: {e}')
     print('Falling back to pure Python')
 "
 ```
@@ -382,13 +402,14 @@ python3 -c "
 | Scenario | Behavior | Impact | Mitigation |
 |---|---|---|---|
 | Archive file | Always Python | None (rare) | None |
-| Multi-file ROM | Per-file C, aggregate Python | Minimal | None |
-| CHD file | C extension for raw file, metadata separate | None | None |
+| Multi-file ROM | Per-file native plugin, aggregate Python (`hash_file_accum` exists but isn't wired in) | Minimal | None |
+| CHD file | Native plugin for raw file, metadata separate | None | None |
 | Size+mtime collision | Cache miss, file re-hashed | Very low likelihood | Manual re-hash or disable cache |
 | Network storage clock skew | Spurious cache misses | Safe but slower | Disable cache on NFS |
 | Patch fails | Fall back to pure Python | Slower, no errors | Run `refresh.sh` |
-| .so corrupted | Import fails, Python fallback | Slower | Delete .so, recompile |
-| Cache module missing | Cache disabled | C extension still works | Verify `install.sh` |
+| Plugin `.so` corrupted/fails verification | Load skipped, Python fallback | Slower | Delete `.so`+`plugin.json`, recompile |
+| Plugin not signed | Refused to load (unless `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`) | Slower (Python fallback) | Set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` for self-built/volume-mount installs |
+| Cache module missing | Cache disabled | Native plugin fast path still works | Verify `install.sh` |
 | SCAN_WORKERS too high | I/O bottleneck | Slower than optimal | Tune for storage type |
 | SKIP_HASH_CALCULATION enabled | No hashing (intentional) | None | None |
 

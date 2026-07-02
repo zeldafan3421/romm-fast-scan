@@ -31,7 +31,7 @@ Usage (mirrors the shape roms_handler.py's patch calls into):
     if result is None:
         result = _python_hash_file(path)      # existing fallback
 
-    accum = pm.MultiFileAccumulator()         # None if hash_file_accum unavailable
+    accum = pm.new_multi_file_accumulator()   # None if hash_file_accum unavailable
     if accum is not None:
         crc, md5, sha1 = accum.hash_file(member_path)
         ...

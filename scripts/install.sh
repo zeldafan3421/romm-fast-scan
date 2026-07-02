@@ -52,7 +52,8 @@ echo "→ Next, wire the plugin into your pod YAML:"
 echo "    python3 $SCRIPT_DIR/patch_romm_yaml.py /path/to/romm.yml $DEST"
 echo ""
 echo "  This backs up romm.yml and adds the entrypoint override, PYTHONPATH,"
-echo "  and volume mount needed to load the plugin. See"
+echo "  FAST_SCAN_ALLOW_UNSIGNED_PLUGINS (plugins built this way aren't signed --"
+echo "  see plugins/README.md), and volume mount needed to load the plugin. See"
 echo "  $REPO_ROOT/examples/romm.patched.example.yml for the expected result."
 
 # ── 3. Sanity check ──────────────────────────────────────────────────────────

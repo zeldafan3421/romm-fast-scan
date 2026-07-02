@@ -59,7 +59,8 @@ echo ""
 echo "What was removed:"
 echo "  - Plugin files at $DEST (compiled .so, patches, scripts)"
 if [ "$YML_CHANGED" = "1" ]; then
-    echo "  - Plugin-related entries in $YML (entrypoint, PYTHONPATH, volume mount)"
+    echo "  - Plugin-related entries in $YML (entrypoint, PYTHONPATH,"
+    echo "    FAST_SCAN_ALLOW_UNSIGNED_PLUGINS if present, volume mount)"
 fi
 echo ""
 echo "What was NOT touched:"
