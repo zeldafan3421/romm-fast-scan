@@ -10,6 +10,15 @@ the class-based multi-file API, raises nothing and simply makes the object
 inert), and the caller falls back to the existing pure-Python path. A
 plugin can degrade a scan's speed; it must never be able to break one.
 
+One check is deliberately NOT fail-open: signature verification. By
+default a plugin whose .so isn't signed by the official key (see
+plugins/README.md's "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+section) is refused outright, not loaded-with-a-warning -- set
+FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1 to opt back into the older
+sha256-tamper-check-only behavior. This still composes with everything
+above: a refused plugin is just another reason a hook stays unavailable
+and callers fall back to Python, same as any other rejection.
+
 stdlib only (ctypes), matching every other Python file in this repo — no
 cffi, no requirements.txt. See CLAUDE.md's "Python here is stdlib-only" note.
 
@@ -34,7 +43,9 @@ import ctypes
 import hashlib
 import json
 import logging
+import os
 import pathlib
+import subprocess
 
 log = logging.getLogger("plugin_manager")
 
@@ -44,6 +55,63 @@ SHA1_BUF_LEN = 41
 ARCHIVE_NAME_MAX = 260
 
 ROMM_PLUGIN_ABI_VERSION = 1
+
+# ── Signing ───────────────────────────────────────────────────────────────
+# Official plugins (fasthash, archive-list) are signed at build time by
+# .github/workflows/build-container.yml's sign-plugins job, using the
+# private half of a keypair that exists only as the PLUGIN_SIGNING_KEY
+# GitHub Actions secret -- it is never committed. Verification here checks
+# a plugin's .so against plugins/official-signers.txt (public key material,
+# safe to commit) via `ssh-keygen -Y verify`, the same primitive git's
+# gpg.format=ssh commit signing uses. See plugins/README.md's "Signing and
+# FAST_SCAN_ALLOW_UNSIGNED_PLUGINS" section for the full rationale.
+#
+# Unlike every other check in this file, an unverified signature does NOT
+# fail open by default -- that's the point. A missing/corrupt/tampered
+# signature, a missing ssh-keygen binary, or a missing official-signers.txt
+# are all treated identically to "not signed by the official key" and the
+# plugin is refused, unless FAST_SCAN_ALLOW_UNSIGNED_PLUGINS is set. This
+# still composes with the rest of the fail-open contract below it: a
+# refused plugin just means this hook returns None, exactly like any other
+# rejection reason already does -- roms_handler.py needs no changes.
+SIGNING_NAMESPACE = "romm-fast-scan-plugin"
+OFFICIAL_SIGNER_IDENTITY = "romm-fast-scan-official"
+ALLOW_UNSIGNED_ENV = "FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+ALLOWED_SIGNERS_FILENAME = "official-signers.txt"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _allow_unsigned() -> bool:
+    return os.environ.get(ALLOW_UNSIGNED_ENV, "").strip().lower() in _TRUTHY
+
+
+def _signature_verified(so_path: pathlib.Path, allowed_signers_path: pathlib.Path) -> bool:
+    """True only if so_path has a matching <so_path>.sig signed by a key
+    listed in allowed_signers_path under OFFICIAL_SIGNER_IDENTITY. Any
+    problem at all -- missing .sig, missing allowed_signers file, missing
+    ssh-keygen binary, a tampered .so, wrong key -- returns False, never
+    raises. False is not itself a rejection; the caller decides what to do
+    with it (see ALLOW_UNSIGNED_ENV above)."""
+    sig_path = so_path.with_name(so_path.name + ".sig")
+    if not sig_path.is_file() or not allowed_signers_path.is_file():
+        return False
+    try:
+        with open(so_path, "rb") as f:
+            result = subprocess.run(
+                [
+                    "ssh-keygen", "-Y", "verify",
+                    "-f", str(allowed_signers_path),
+                    "-I", OFFICIAL_SIGNER_IDENTITY,
+                    "-n", SIGNING_NAMESPACE,
+                    "-s", str(sig_path),
+                ],
+                stdin=f,
+                capture_output=True,
+                timeout=10,
+            )
+    except Exception:
+        return False
+    return result.returncode == 0
 
 # hook name -> loaded implementation, populated by load_plugins()
 _HOOKS: dict = {}
@@ -250,6 +318,20 @@ def load_plugins(plugin_dir: str) -> None:
             actual_sha = _sha256_of(so_path)
             if actual_sha != claimed_sha:
                 raise ValueError(f"sha256 mismatch (manifest={claimed_sha[:12]}... actual={actual_sha[:12]}...)")
+
+            allowed_signers_path = root / ALLOWED_SIGNERS_FILENAME
+            signed = _signature_verified(so_path, allowed_signers_path)
+            if not signed:
+                if not _allow_unsigned():
+                    raise ValueError(
+                        f"not signed by the official key (see plugins/README.md) -- "
+                        f"set {ALLOW_UNSIGNED_ENV}=1 to load unsigned/third-party plugins anyway"
+                    )
+                log.warning(
+                    "[plugin] %s: loading WITHOUT a verified signature because %s=1 is set -- "
+                    "this is running unverified native code",
+                    plugin_label, ALLOW_UNSIGNED_ENV,
+                )
 
             manifest_abi = meta.get("abi_version")
 

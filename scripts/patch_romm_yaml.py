@@ -192,10 +192,20 @@ def main():
         "entrypoint override",
     )
 
-    # ── Patch 2: inject PYTHONPATH env var ───────────────────────────────────
-    # Find the last env entry (ROMM_AUTH_SECRET_KEY) and append PYTHONPATH after it.
+    # ── Patch 2: inject PYTHONPATH + FAST_SCAN_ALLOW_UNSIGNED_PLUGINS env vars ─
+    # Find the last env entry (ROMM_AUTH_SECRET_KEY) and append both after it.
     # We match the auth key name line + value line + the closing volumeMounts line
     # so the insertion point is unambiguous.
+    #
+    # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS is required here, not optional: plugins
+    # built this way (compiled inside the container on first boot, see
+    # start.sh's compile_plugins()) are never signed -- only this repo's own
+    # CI holds the private signing key (see plugins/README.md's "Signing and
+    # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"). Without this, plugin_manager.py
+    # would refuse every plugin this install path produces, silently falling
+    # back to pure-Python hashing -- defeating the entire point of installing
+    # this plugin. If you'd rather run signed plugins, use the prebuilt
+    # ghcr.io image (Option A/B in README.md) instead of this script.
     text = patch(
         text,
         "        - name: ROMM_AUTH_SECRET_KEY\n          value:",
@@ -203,10 +213,15 @@ def main():
             "        # fast-scan plugin: makes plugin_manager importable\n"
             "        - name: PYTHONPATH\n"
             "          value: \"/romm-plugin/src:/backend\"\n"
+            "        # fast-scan plugin: plugins built by this install path\n"
+            "        # aren't signed -- see plugins/README.md \"Signing and\n"
+            "        # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS\"\n"
+            "        - name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS\n"
+            "          value: \"1\"\n"
             "        - name: ROMM_AUTH_SECRET_KEY\n"
             "          value:"
         ),
-        "PYTHONPATH env var",
+        "PYTHONPATH + FAST_SCAN_ALLOW_UNSIGNED_PLUGINS env vars",
     )
 
     # ── Patch 3: inject volumeMount for the plugin dir ───────────────────────
@@ -263,6 +278,7 @@ def main():
     checks = [
         "/romm-plugin/start.sh",
         "PYTHONPATH",
+        "FAST_SCAN_ALLOW_UNSIGNED_PLUGINS",
         "romm-fast-scan-plugin",
         PLUGIN_HOST_PATH,
     ]
@@ -277,6 +293,7 @@ def main():
     print("Patched successfully. Summary of changes:")
     print("  + command: [\"/romm-plugin/start.sh\"]       (entrypoint wrapper)")
     print("  + PYTHONPATH=/romm-plugin/src:/backend      (makes .so importable)")
+    print("  + FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1        (this path's plugins aren't signed)")
     print("  + volumeMount romm-fast-scan-plugin → /romm-plugin")
     print(f"  + volume hostPath {PLUGIN_HOST_PATH}")
     print()

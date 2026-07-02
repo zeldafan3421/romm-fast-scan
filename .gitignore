@@ -12,5 +12,9 @@ romm.*.yml
 # Plugin build artifacts (source .c and plugin.json.tmpl templates are
 # tracked; the compiled .so and the finalized plugin.json -- with a real
 # sha256 that changes every rebuild -- are not, same as lib/*.so above).
+# .sig files are the same story: regenerated per signed build, not tracked.
+# plugins/official-signers.txt is NOT covered by this rule -- it's
+# committed public key material, not a build artifact.
 plugins/*/*.so
+plugins/*/*.sig
 plugins/*/plugin.json

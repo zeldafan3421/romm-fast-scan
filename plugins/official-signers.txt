@@ -1,0 +1,21 @@
+# Official plugin signing keys for romm-fast-scan, in ssh-keygen "allowed
+# signers" format (the same primitive git's gpg.format=ssh commit signing
+# uses): "<identity> <keytype> <base64-key> [comment]" per line.
+#
+# src/plugin_manager.py's _signature_verified() checks a plugin's .so
+# against this file via `ssh-keygen -Y verify`. Only plugins signed by a
+# key listed here (identity "romm-fast-scan-official") verify by default;
+# everything else needs FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1 to load. See
+# plugins/README.md's "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS" section.
+#
+# The corresponding private key is stored only as the GitHub Actions
+# secret PLUGIN_SIGNING_KEY (.github/workflows/build-container.yml's
+# sign-plugins job) -- it is never committed and never leaves that secret
+# store. This file holds public key material only, safe to be public.
+#
+# Rotating this key: generate a new keypair, append its public half below
+# on a new line (multiple keys may be valid at once), start signing new
+# builds with the new private key, and remove the old line only once no
+# artifacts signed with it are expected to still be in circulation.
+
+romm-fast-scan-official ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILepxIO+Fc89xm35akHnIZ14HdoLI7hJpQGVkP+JgRGW romm-fast-scan official plugin signing key

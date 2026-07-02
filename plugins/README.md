@@ -173,12 +173,17 @@ required on this repo's side at all.
 plugin.** A plugin `.so` is native code that runs inside your RomM
 container with the same privileges RomM itself has. The `sha256` in
 `plugin.json` is a *corruption/tamper* check — it confirms the `.so` on
-disk matches what the manifest claims, nothing more. It is **not** a
-signature or an authenticity guarantee: anyone able to edit both files
-together can make this check pass. Only install a precompiled plugin from
+disk matches what the manifest claims, nothing more; anyone able to edit
+both files together can make it pass. This is now backed by something
+stronger by default: see "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+below — a precompiled/third-party plugin isn't signed by the official key
+(it can't be; only this repo's own CI holds that private key), so loading
+one requires deliberately setting `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`.
+That env var is the actual trust decision — only set it for a plugin from
 a source you'd trust to the same degree as any other native binary you'd
 run with your container's privileges. If in doubt, prefer a plugin you
-can read the source of and build yourself.
+can read the source of and build yourself, and understand that self-built
+copy will *also* need the env var (see below for why).
 
 **Hook collisions:** if two loaded plugins declare the same hook,
 `plugin_manager.py` keeps whichever loads first (directories are visited
@@ -193,6 +198,56 @@ build-plugins.sh` / `start.sh` / the `Containerfile`'s builder stage —
 see "Building" above) so this repo starts building and shipping it going
 forward. That's a case-by-case maintainer decision today, not an
 automated process.
+
+## Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`
+
+Official plugins (`fasthash`, `archive-list`) are cryptographically
+signed at build time. By default, `plugin_manager.py`'s `load_plugins()`
+**refuses to load any plugin that isn't signed by the official key** —
+this includes precompiled/third-party plugins (above) *and* a plugin you
+built yourself from this repo's own source. Set
+`FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` to opt back into the older,
+weaker behavior (sha256 tamper-check only, no authenticity check) at your
+own risk.
+
+**Mechanism:** `ssh-keygen -Y sign` / `-Y verify` — the same primitive
+`git`'s `gpg.format=ssh` commit signing uses, chosen so this stays
+dependency-free (no `cryptography`/`pynacl`, consistent with "Python here
+is stdlib-only," just an external CLI tool the same way `patch`/`gcc`
+already are). `.github/workflows/build-container.yml`'s `sign-plugins`
+job builds every plugin once (plugins have no RomM-version coupling, see
+above), signs each `.so` with the private half of a keypair that exists
+**only** as the `PLUGIN_SIGNING_KEY` GitHub Actions secret — never
+committed, never written into a Docker build context or image layer — and
+hands the signed artifact to every matrix build leg. `plugins/
+official-signers.txt` (committed — public key material, safe to be
+public) is what `plugin_manager.py` verifies against.
+
+**Why self-built plugins need the env var too, even from this repo's own
+source:** the check is "signed by the official key," not "built from
+trusted source." `plugin_manager.py` has no way to distinguish "you
+compiled the exact same `fasthash.c` yourself" from "a stranger compiled
+something else entirely" — only CI holds the private key. If you build
+locally (`scripts/build-plugins.sh`) or use the volume-mount install
+path, either set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`, or extract the
+already-signed `.so`+`.sig` out of the published `ghcr.io` image instead
+of rebuilding (`podman cp`/`docker cp` from a running container).
+
+**What "unverifiable" means:** a missing `.sig` file, a missing
+`official-signers.txt`, a missing `ssh-keygen` binary, or a genuinely
+invalid signature are all treated identically — as "not signed" — and
+gated by the same env var. This is one of the only checks in this repo
+that does *not* fail open toward "just use pure Python" by default; it
+fails toward "don't run this native code." The official image always has
+`ssh-keygen` installed (`Containerfile`'s runtime stage), so this
+fallback path is realistically only ever hit on a self-built or
+volume-mount install, not the published image.
+
+**Rotating the signing key** (not needed today, first key): generate a
+new keypair, append its public half as a new line in
+`official-signers.txt` (multiple valid keys can coexist), start signing
+new builds with the new private key, and remove the old line only once no
+artifacts signed with it are expected to still be circulating.
 
 ## Testing a new plugin
 
@@ -226,7 +281,9 @@ verify `fasthash` and `archive-list`:
    TSan wasn't reliably available in the sandbox this was built in).
 5. Confirm the loader's safety nets actually work for your plugin
    specifically: corrupt its `sha256` in `plugin.json` (should skip,
-   logged, not loaded) and its `abi_version` (same).
+   logged, not loaded), its `abi_version` (same), and remove/tamper its
+   `.sig` (should skip unless `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`, see
+   "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" below).
 
 ## Adding the hook to `roms_handler.py` (only for a genuinely new hook)
 

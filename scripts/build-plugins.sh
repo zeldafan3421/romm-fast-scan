@@ -14,6 +14,14 @@
 # Usage:
 #   sh scripts/build-plugins.sh              # builds every plugins/*/*.c
 #   sh scripts/build-plugins.sh fasthash      # build just one plugin
+#
+# NOTE: a plugin built here is NOT signed. src/plugin_manager.py refuses to
+# load an unsigned plugin by default (see plugins/README.md's "Signing and
+# FAST_SCAN_ALLOW_UNSIGNED_PLUGINS") -- only the official
+# .github/workflows/build-container.yml pipeline holds the private signing
+# key. To use a plugin built by this script, set
+# FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1, or prefer extracting the officially
+# signed .so/.sig out of the published ghcr.io image instead of rebuilding.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e

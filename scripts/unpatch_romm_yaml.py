@@ -87,7 +87,7 @@ def main():
         "entrypoint override",
     )
 
-    # ── Undo 2: PYTHONPATH env var ────────────────────────────────────────────
+    # ── Undo 2: PYTHONPATH + FAST_SCAN_ALLOW_UNSIGNED_PLUGINS env vars ────────
     text = remove_block(
         text,
         (
@@ -96,6 +96,20 @@ def main():
             "          value: \"/romm-plugin/src:/backend\"\n"
         ),
         "PYTHONPATH env var",
+    )
+    # Optional (required=False): a romm.yml patched before signing existed
+    # in this repo won't have this block at all -- that's fine, not an error.
+    text = remove_block(
+        text,
+        (
+            "        # fast-scan plugin: plugins built by this install path\n"
+            "        # aren't signed -- see plugins/README.md \"Signing and\n"
+            "        # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS\"\n"
+            "        - name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS\n"
+            "          value: \"1\"\n"
+        ),
+        "FAST_SCAN_ALLOW_UNSIGNED_PLUGINS env var",
+        required=False,
     )
 
     # ── Undo 3: volumeMount entry ─────────────────────────────────────────────
@@ -140,7 +154,7 @@ def main():
     # ── Sanity check: verify no plugin markers remain ────────────────────────
     leftover = [
         m
-        for m in ("/romm-plugin/start.sh", "PYTHONPATH", "romm-fast-scan-plugin")
+        for m in ("/romm-plugin/start.sh", "PYTHONPATH", "FAST_SCAN_ALLOW_UNSIGNED_PLUGINS", "romm-fast-scan-plugin")
         if m in text
     ]
     if leftover:
@@ -153,6 +167,7 @@ def main():
     print("Unpatched successfully. Removed:")
     print("  - command: [\"/romm-plugin/start.sh\"]       (entrypoint override)")
     print("  - PYTHONPATH=/romm-plugin/src:/backend      (env var)")
+    print("  - FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1        (env var, if present)")
     print("  - volumeMount romm-fast-scan-plugin → /romm-plugin")
     print("  - volume hostPath definition")
     print()
