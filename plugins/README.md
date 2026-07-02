@@ -184,3 +184,7 @@ scan path currently does, since listing a ZIP's stored metadata isn't a
 drop-in replacement for the actual decompress-and-hash work the archive
 branch does today. Wiring it in as a fast pre-check would be exactly this
 kind of new-hook integration, if it's ever wanted.
+
+See `../CLAUDE.md`'s "Roadmap: incremental backend replacement" section for
+where `archive_list`, `hash_file_accum`, and other not-yet-started hooks
+fit into this project's longer-term plan.

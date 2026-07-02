@@ -1,0 +1,30 @@
+name: RomM Compatibility Watch
+
+# Operationalizes the "5.*.* indefinitely" compatibility commitment (see
+# CLAUDE.md's Roadmap section): weekly, checks whether upstream rommapp/romm
+# has published a 5.x release this repo's known_sha256.txt doesn't cover yet,
+# and if so, opens/refreshes a single tracking issue (label: compat-watch).
+#
+# Deliberately does NOT run scripts/refresh.sh or commit anything -- closing
+# a gap still needs a human running refresh.sh inside a live container of
+# the new version and reviewing the generated diff. See
+# scripts/check_upstream_versions.py for the full rationale.
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'  # every Monday, 13:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check upstream RomM 5.x releases against known_sha256.txt
+        run: python3 scripts/check_upstream_versions.py

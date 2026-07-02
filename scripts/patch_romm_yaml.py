@@ -36,12 +36,6 @@ ALLOW_DEPRECATED = "--allow-deprecated" in sys.argv
 if ALLOW_DEPRECATED:
     sys.argv = [a for a in sys.argv if a != "--allow-deprecated"]
 
-# RomM versions with a published ghcr.io/zeldafan3421/romm-fast-scan image.
-# Deliberately separate from known_sha256.txt (which tracks versions with
-# prepatched *source*, a broader set) -- keep this in sync with the tags
-# .github/workflows/build-container.yml actually publishes.
-SUPPORTED_IMAGE_VERSIONS = {"4.9.2"}
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Path on the HOST where you deployed the plugin files.
@@ -49,6 +43,54 @@ SUPPORTED_IMAGE_VERSIONS = {"4.9.2"}
 PLUGIN_HOST_PATH = sys.argv[2] if len(sys.argv) > 2 else "/opt/romm/fast-scan-plugin"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_known_sha_versions(path):
+    """Minimal inline parser for known_sha256.txt's "<sha>  <filename>  #
+    RomM <version>" lines, returning just the version labels. Deliberately
+    duplicated from scripts/list_known_versions.py's Entry.version_label
+    convention rather than imported from it: this script is documented as a
+    standalone file users copy next to their own romm.yml (see the module
+    docstring), so it can't depend on a sibling module being present. If you
+    change the known_sha256.txt line format, update both places."""
+    versions = []
+    try:
+        with open(path) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                _, _, comment = line.partition("#")
+                comment = comment.strip()
+                if comment.lower().startswith("romm "):
+                    versions.append(comment[5:].strip())
+    except OSError:
+        return None
+    return versions
+
+def load_supported_image_versions():
+    """RomM versions with a published ghcr.io/zeldafan3421/romm-fast-scan
+    image. Since .github/workflows/build-container.yml now builds/publishes
+    every version known_sha256.txt covers automatically (see CLAUDE.md's
+    "Versioning model" section), this reads that same ledger instead of
+    keeping a second hardcoded list in sync by hand. Tries, in order: the
+    deployed plugin directory (PLUGIN_HOST_PATH -- already there in the
+    documented install flow, via install.sh), then a path relative to this
+    script (a repo checkout), then the current directory. Fails open to an
+    empty set if known_sha256.txt isn't found anywhere -- worst case, this
+    script just runs as if no version has a published image yet, which is
+    never wrong, only occasionally more cautious than necessary."""
+    candidates = [
+        os.path.join(PLUGIN_HOST_PATH, "known_sha256.txt"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "known_sha256.txt"),
+        os.path.join(os.getcwd(), "known_sha256.txt"),
+    ]
+    for path in candidates:
+        versions = _parse_known_sha_versions(path)
+        if versions is not None:
+            return set(versions)
+    return set()
+
+SUPPORTED_IMAGE_VERSIONS = load_supported_image_versions()
 
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)

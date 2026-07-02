@@ -2,7 +2,7 @@
 
 A drop-in scanning performance plugin for [RomM](https://github.com/rommapp/romm) built on a small native-plugin system: RomM's `roms_handler.py` is patched **once** to call into `plugin_manager.py`, which loads plain C-ABI `.so` plugins at runtime. The first plugin, `fasthash`, replaces RomM's pure-Python file hashing with GIL-released native CRC32/MD5/SHA1, enabling genuine parallel hashing across scan workers.
 
-Verified against **RomM 4.9.2** and **5.0.0-alpha.2**. Includes tooling to stay compatible across updates.
+Committed to supporting every RomM **5.\*.\*** backend release, indefinitely — see [Compatibility commitment](#compatibility-commitment) below. Verified today against RomM **4.9.2** and **5.0.0-alpha.2**.
 
 ---
 
@@ -173,6 +173,17 @@ On an unchanged library this turns a full rescan from "read every byte" into a s
 
 ---
 
+## Compatibility commitment
+
+This repo commits to supporting every RomM **5.\*.\*** backend release, indefinitely, and to **indefinite RomM frontend compatibility**. Neither is just a promise — both are backed by mechanism:
+
+- **Backend, 5.\*.\*:** `scripts/list_known_versions.py` reads `known_sha256.txt` (the ledger every `refresh.sh` run appends to) as the single source of truth for which versions are supported, and `.github/workflows/build-container.yml` builds and publishes a `ghcr.io/zeldafan3421/romm-fast-scan:<version>-fast-scan` image for **every** version that ledger covers — automatically, via a build matrix, on every push to `main`. Adding a new RomM version is "run `refresh.sh`, commit the result"; nothing else needs hand-editing. A weekly scheduled workflow (`.github/workflows/compat-watch.yml`) checks upstream `rommapp/romm` releases for any `5.x` version not yet covered and opens a tracking issue if it finds one — so a gap gets surfaced automatically rather than discovered by a user.
+- **Frontend, indefinitely:** every part of this project — the `roms_handler.py` source patch and every native plugin — operates entirely on RomM's Python backend. Nothing here reads, patches, or depends on RomM's frontend in any way, so no frontend change can ever break it. CI greps for accidental `frontend` references in the patched files as a cheap guard against that ever changing by mistake.
+
+See `CLAUDE.md`'s "Versioning model" and "Roadmap: incremental backend replacement" sections for the full mechanism and where this project is headed next (hashing is the first of several planned hooks, not the only one).
+
+---
+
 ## Staying up to date with RomM
 
 On each boot `start.sh` patches `roms_handler.py` using a three-tier strategy:
@@ -183,7 +194,7 @@ On each boot `start.sh` patches `roms_handler.py` using a three-tier strategy:
 
 **If you're on the volume-mount (advanced) install**, this runs fresh against whatever image tag you're currently running, so pulling a new `rommapp/romm` tag just works — you'll see the warning below if that version is new enough to miss both tier-1 and tier-2.
 
-**If you're on a prebuilt image** (Option A/B), the RomM version is fixed by whichever image tag you deployed. To move to a newer RomM release, pull/build the matching fast-scan-tagged image and swap `image:` again — same one-line change as installing. The published ghcr.io image is rebuilt automatically on every push to this repo's `main` branch (see `.github/workflows/build-container.yml`), so `4.9.2-fast-scan` always reflects the latest plugin fixes for that RomM version; it does not itself track new RomM *versions* until this repo's Containerfile is updated to build against them.
+**If you're on a prebuilt image** (Option A/B), the RomM version is fixed by whichever image tag you deployed. To move to a newer RomM release, pull/build the matching fast-scan-tagged image and swap `image:` again — same one-line change as installing. Every known-version image is rebuilt automatically on every push to this repo's `main` branch (see `.github/workflows/build-container.yml`'s build matrix, derived from `known_sha256.txt` via `scripts/list_known_versions.py`), so e.g. `4.9.2-fast-scan` always reflects the latest plugin fixes for that RomM version. A published image for a *new* RomM version appears as soon as this repo has run `refresh.sh` against it and committed the result — see [Compatibility commitment](#compatibility-commitment) above.
 
 When you see this warning after a `docker pull` (or when the image build hits a RomM version this hasn't been refreshed against yet):
 
@@ -288,7 +299,9 @@ romm-fast-scan/
 ├── Container Automation:
 │   ├── Dockerfile               Docker build file
 │   ├── Containerfile            Podman build file
-│   └── .github/workflows/       GitHub Actions CI/CD
+│   └── .github/workflows/
+│       ├── build-container.yml   Builds+publishes an image for every known-version (matrix)
+│       └── compat-watch.yml      Weekly: flags upstream RomM 5.x versions not yet covered
 │
 ├── scripts/                     Utility scripts
 │   ├── install.sh                Host-side plugin deployment
@@ -300,7 +313,9 @@ romm-fast-scan/
 │   ├── run-docker.sh             Run RomM + plugin with plain `docker run`, no config file
 │   ├── run-podman.sh             Run RomM + plugin with plain `podman run`, no config file
 │   ├── refresh.sh                Re-generates patch after a RomM update
-│   └── prune_versions.py         Removes old recorded RomM versions
+│   ├── prune_versions.py         Removes old recorded RomM versions
+│   ├── list_known_versions.py    Single source of truth for "which versions are supported"
+│   └── check_upstream_versions.py  Compares known_sha256.txt against upstream RomM releases
 │
 ├── examples/                    Example configurations
 │   ├── romm.release.yml         Ready-to-deploy pod YAML (Option A/B image swap)

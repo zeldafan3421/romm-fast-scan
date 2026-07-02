@@ -98,11 +98,22 @@ There's no CI test job and no unit-test framework wired in (`.github/workflows/b
 
 ## Versioning model
 
-This repo supports **multiple RomM versions simultaneously**, not just the latest:
-- `SUPPORTED_IMAGE_VERSIONS` in `scripts/patch_romm_yaml.py` lists RomM versions with a published `ghcr.io/zeldafan3421/romm-fast-scan:<version>-fast-scan` image (currently just `4.9.2`) — keep this in sync with what `.github/workflows/build-container.yml` actually publishes.
-- `known_sha256.txt` / `overrides/prepatched/` track a broader set — every version anyone has ever run `refresh.sh` against, image-published or not.
+This repo supports **multiple RomM versions simultaneously**, not just the latest, and `known_sha256.txt` is the single source of truth for which ones: every version anyone has ever run `refresh.sh` against, image-published or not, in append-only order.
+- `scripts/list_known_versions.py` reads that ledger and is the one place version lists get derived from — nothing else should hardcode a second copy. `--json` feeds a CI matrix, `--only VERSION` validates one, no flags prints one per line.
+- `.github/workflows/build-container.yml` builds and publishes a `ghcr.io/zeldafan3421/romm-fast-scan:<version>-fast-scan` image for **every** version `list_known_versions.py` reports, via a matrix job — not a single hardcoded tag. Adding support for a new RomM version is "run `refresh.sh` inside a live container of it, review the diff, commit `known_sha256.txt` + the new `overrides/prepatched/<version>.py`" — the next push to `main` publishes an image for it with no separate CI edit required. This is the mechanism behind the compatibility commitment below.
+- `scripts/patch_romm_yaml.py`'s `SUPPORTED_IMAGE_VERSIONS` is computed the same way (`load_supported_image_versions()`, reading `known_sha256.txt` from the deployed plugin path, then a repo checkout, then CWD, failing open to an empty set if none is found) rather than a hardcoded set — but that file stays a standalone-copyable script (see its module docstring), so it keeps its *own* small inlined copy of the comment-parsing logic instead of importing `list_known_versions.py`. If you ever change `known_sha256.txt`'s line format, update both.
 - The volume-mount install path (`patch_romm_yaml.py`, `install.sh`) is the deprecated-but-supported fallback for any RomM version *without* a published image yet; it refuses to proceed against a version that already has one unless `--allow-deprecated` is passed.
-- CI (`.github/workflows/build-container.yml`) only builds the pinned `4.9.2-fast-scan` tag on every push to `main` — bumping to a new RomM release requires updating `ARG BASE_IMAGE` in `Containerfile`/the workflow's `type=raw,value=...` tag, not just editing source.
+- `.github/workflows/compat-watch.yml` (`scripts/check_upstream_versions.py`) runs weekly, diffing upstream `rommapp/romm`'s published `5.*` releases against `known_sha256.txt` and opening/refreshing/closing a single tracking issue (label `compat-watch`) when a gap appears — see the Roadmap section below. It never runs `refresh.sh` or commits anything itself; closing a gap still needs a human in the loop.
+
+## Roadmap: incremental backend replacement
+
+The plugin system's first (and so far only) hook, `hash_file`, replaces one hot path in `roms_handler.py`. The longer-term plan is to extend the same mechanism — one hook at a time, same three-tier patch discipline, same fail-open contract, never a rewrite — to other CPU-bound spots in RomM's backend, as capacity and need line up. Concretely, in rough order:
+
+1. **`hash_file` — done.** Wired into `roms_handler.py`, shipped in the `fasthash` plugin.
+2. **`archive_list` / `hash_file_accum` — proven, not yet wired.** Both hooks exist in `include/romm_plugin_abi.h`, both are implemented and load correctly through `plugin_manager.py` (see `plugins/README.md`'s "Adding the hook to roms_handler.py" section for exactly what wiring either of these in would take), but neither is called anywhere in `roms_handler.py` yet.
+3. **Named future candidates, no code yet:** cover/thumbnail resizing in `resources_handler.py` (Pillow-based today) and fuzzy metadata-name matching in `igdb_handler.py` are the next most CPU-bound spots in RomM's backend worth a native plugin, based on a survey of the source — nothing beyond this note exists for either yet.
+
+**Compatibility commitment.** This repo commits to supporting every RomM **5.\*.\*** backend release, indefinitely, via the mechanism in "Versioning model" above (an automated build matrix plus a weekly upstream-gap check) rather than by promise alone. It commits to **indefinite RomM frontend compatibility** too, but that one is close to free: every hook this repo has or has ever proposed operates entirely on RomM's Python backend and native plugins loaded into it — nothing in this mechanism can read, patch, or depend on RomM's frontend, so no frontend change can ever break it. `build-container.yml` greps for accidental `frontend` references in the patch/override files as a cheap guard against that ever changing by mistake.
 
 ## Fallback-safety is the design contract
 
