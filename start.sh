@@ -72,25 +72,29 @@ compile_extension || true
 patch_handler() {
     [ -f "$TARGET_PY" ] || { log "Target $TARGET_PY not found — skipping patch"; return; }
 
+    # Computed once up front (not nested in the tier-1 branch below) so it's
+    # always available for the diagnostic message at the bottom if every tier
+    # fails -- the single most useful piece of information for figuring out
+    # why, since it's exactly what a new/unrecognized version's SHA looks like.
+    CURRENT_SHA=$(sha256sum "$TARGET_PY" 2>/dev/null | awk '{print $1}')
+
     # a. Exact SHA match: safe to copy the matching pre-patched file directly.
     #    known_sha256.txt maps each known UNPATCHED upstream SHA to its own
     #    pre-patched file, so multiple RomM versions are supported at once.
-    if [ -f "$KNOWN_SHA_FILE" ] && [ -d "$PREPATCHED_DIR" ]; then
-        CURRENT_SHA=$(sha256sum "$TARGET_PY" 2>/dev/null | awk '{print $1}')
-        if [ -n "$CURRENT_SHA" ]; then
-            # Read "<sha> <filename>" lines, skipping comments and blanks.
-            MATCH_FILE=$(awk -v cur="$CURRENT_SHA" \
-                '/^[[:space:]]*#/ || /^[[:space:]]*$/ {next} $1==cur {print $2; exit}' \
-                "$KNOWN_SHA_FILE")
-            if [ -n "$MATCH_FILE" ] && [ -f "$PREPATCHED_DIR/$MATCH_FILE" ]; then
-                cp "$PREPATCHED_DIR/$MATCH_FILE" "$TARGET_PY" \
-                    && log "Installed roms_handler.py (exact match: $MATCH_FILE)" \
-                    && return
-            fi
+    if [ -f "$KNOWN_SHA_FILE" ] && [ -d "$PREPATCHED_DIR" ] && [ -n "$CURRENT_SHA" ]; then
+        # Read "<sha> <filename>" lines, skipping comments and blanks.
+        MATCH_FILE=$(awk -v cur="$CURRENT_SHA" \
+            '/^[[:space:]]*#/ || /^[[:space:]]*$/ {next} $1==cur {print $2; exit}' \
+            "$KNOWN_SHA_FILE")
+        if [ -n "$MATCH_FILE" ] && [ -f "$PREPATCHED_DIR/$MATCH_FILE" ]; then
+            cp "$PREPATCHED_DIR/$MATCH_FILE" "$TARGET_PY" \
+                && log "Installed roms_handler.py (exact match: $MATCH_FILE)" \
+                && return
         fi
     fi
 
     # b. Try to apply the unified diff patch (survives minor upstream changes)
+    PATCH_DRY_RUN_OUTPUT=""
     if [ -f "$PATCH_FILE" ]; then
         # Install patch utility if missing
         if ! command -v patch > /dev/null 2>&1; then
@@ -98,8 +102,10 @@ patch_handler() {
         fi
 
         if command -v patch > /dev/null 2>&1; then
-            # Dry-run first so we never leave a half-patched file
-            if patch --dry-run -N -s "$TARGET_PY" "$PATCH_FILE" 2>/dev/null; then
+            # Dry-run first so we never leave a half-patched file. Capture its
+            # output (normally discarded) so a failure here can say *why*.
+            PATCH_DRY_RUN_OUTPUT=$(patch --dry-run -N -s "$TARGET_PY" "$PATCH_FILE" 2>&1)
+            if [ $? -eq 0 ]; then
                 patch -N -s "$TARGET_PY" "$PATCH_FILE" 2>/dev/null \
                     && log "Applied roms_handler.py patch" \
                     && return
@@ -108,9 +114,16 @@ patch_handler() {
     fi
 
     # c. Neither worked — warn loudly but let RomM start normally
+    ROMM_VER=$("$PYTHON" -c "import importlib.metadata; print(importlib.metadata.version('romm'))" 2>/dev/null || echo "unknown")
     log "WARNING: Could not patch roms_handler.py."
     log "         RomM has likely updated. The C extension is compiled but"
     log "         hashing falls back to pure Python until you update the plugin."
+    log "         RomM version:  $ROMM_VER"
+    log "         Current SHA256: ${CURRENT_SHA:-<sha256sum failed>}"
+    if [ -n "$PATCH_DRY_RUN_OUTPUT" ]; then
+        log "         Patch dry-run said:"
+        printf '%s\n' "$PATCH_DRY_RUN_OUTPUT" | while IFS= read -r line; do log "           $line"; done
+    fi
     log "         Run:  sh $PLUGIN_DIR/refresh.sh  to regenerate the patch."
 }
 
