@@ -1,15 +1,24 @@
 # Writing a romm-fast-scan plugin
 
-A plugin is a plain C shared library (`.so`) plus a `plugin.json` manifest.
-It has no Python.h, no CPython ABI coupling, and no dependency on which
-RomM version or Python minor version it will run alongside — build it once
-per (arch, libc) target and it works everywhere, forever. This is what
-lets `roms_handler.py` get patched **once** (see `../roms_handler.patch`)
-to call into `plugin_manager.hash_file(...)` instead of needing a new
-source patch every time the hashing implementation changes.
+A plugin is a shared library (`.so`) exposing a small C ABI, plus a
+`plugin.json` manifest. Nothing about the ABI requires C or C++
+specifically — only that the result is a proper `extern "C"`-equivalent
+shared library, which most native-compiled languages can produce (Rust as
+a `cdylib`, Go with `-buildmode=c-shared`, Zig, and so on, in addition to
+C/C++). It has no Python.h, no CPython ABI coupling, and no dependency on
+which RomM version or Python minor version it will run alongside — build
+it once per (arch, libc) target and it works everywhere, forever. This is
+what lets `roms_handler.py` get patched **once** (see
+`../roms_handler.patch`) to call into `plugin_manager.hash_file(...)`
+instead of needing a new source patch every time the hashing
+implementation changes.
 
 See `../include/romm_plugin_abi.h` for the full, authoritative contract —
-this file is a guide to using it, not a copy of it.
+this file is a guide to using it, not a copy of it. Everything below
+through "Building" describes the source-in-this-repo path (write C, get
+it compiled by this repo's own tooling); see "Precompiled and third-party
+plugins" further down if you'd rather build elsewhere, in another
+language, or install a plugin someone else already built.
 
 ## The rules (non-negotiable)
 
@@ -130,6 +139,60 @@ sha256sum libyourname.so   # paste into plugin.json's "sha256" field
 No `python3-dev`, no `python-config`, no per-Python-minor-version rebuild
 — that whole problem belonged to the old single CPython extension this
 system replaced, and doesn't apply to a plain C-ABI `.so` at all.
+
+## Precompiled and third-party plugins
+
+Everything above describes the source-in-this-repo path. That's not the
+only way to get a plugin loaded.
+
+`src/plugin_manager.py`'s `load_plugins()` only ever looks for a
+finalized `plugin.json` next to a `.so` (`sorted(root.glob("*/plugin.json"))`)
+— it has no idea whether either file came from this repo's build tooling,
+a bare `gcc` invocation on your own machine, `cargo build`, `go build
+-buildmode=c-shared`, or anything else. Separately, `start.sh`'s
+`compile_plugins()` only ever looks for a `.c` file or a `plugin.json.tmpl`
+(`*/*.c`, `*/plugin.json.tmpl`) — a plugin directory with neither is
+invisible to it, silently skipped, not logged as an error. Put together:
+**a plugin directory containing only a finalized `plugin.json` and its
+matching `.so` is never touched by the build phase and is loaded normally
+by the load phase.** This isn't a special case bolted on for this
+purpose — it's what falls out of keeping "build" and "load" as genuinely
+separate concerns, verified live against a plugin built entirely outside
+this repo's tooling (no `.c` in the deployed directory, no `.tmpl`, no
+`build-plugins.sh`/`start.sh`/`Containerfile` involvement) — it loaded,
+passed sha256/ABI verification, and its hook produced correct output with
+zero special-casing anywhere in `plugin_manager.py`.
+
+**To install one:** drop `<name>/plugin.json` (finalized — a real
+`sha256`, not `null`) and `<name>/<so_file>` into the plugins root (the
+deployed `/romm-plugin/plugins/` for a live install, or `plugins/` if
+you're building a custom image). No `.c`, no `.tmpl`, no build step
+required on this repo's side at all.
+
+**Trust and provenance — read this before installing someone else's
+plugin.** A plugin `.so` is native code that runs inside your RomM
+container with the same privileges RomM itself has. The `sha256` in
+`plugin.json` is a *corruption/tamper* check — it confirms the `.so` on
+disk matches what the manifest claims, nothing more. It is **not** a
+signature or an authenticity guarantee: anyone able to edit both files
+together can make this check pass. Only install a precompiled plugin from
+a source you'd trust to the same degree as any other native binary you'd
+run with your container's privileges. If in doubt, prefer a plugin you
+can read the source of and build yourself.
+
+**Hook collisions:** if two loaded plugins declare the same hook,
+`plugin_manager.py` keeps whichever loads first (directories are visited
+in sorted order) and logs a warning for the rest — it does not error or
+refuse to boot.
+
+**Getting a good third-party plugin adopted into this repo:** if a
+precompiled plugin someone built independently proves widely useful and
+its author is willing to share the source, it can be brought into
+`plugins/<name>/` and wired into the standard build tooling (`scripts/
+build-plugins.sh` / `start.sh` / the `Containerfile`'s builder stage —
+see "Building" above) so this repo starts building and shipping it going
+forward. That's a case-by-case maintainer decision today, not an
+automated process.
 
 ## Testing a new plugin
 
