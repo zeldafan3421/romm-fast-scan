@@ -80,7 +80,7 @@ def main():
         (
             "\n"
             "      # fast-scan plugin: override entrypoint so start.sh can\n"
-            "      # compile _fasthash.so and patch roms_handler.py before boot.\n"
+            "      # compile plugins and patch roms_handler.py before boot.\n"
             "      command: [\"/romm-plugin/start.sh\"]\n"
             "\n"
         ),
@@ -91,9 +91,9 @@ def main():
     text = remove_block(
         text,
         (
-            "        # fast-scan plugin: makes _fasthash.so importable\n"
+            "        # fast-scan plugin: makes plugin_manager importable\n"
             "        - name: PYTHONPATH\n"
-            "          value: \"/romm-plugin/lib:/backend\"\n"
+            "          value: \"/romm-plugin/src:/backend\"\n"
         ),
         "PYTHONPATH env var",
     )
@@ -152,7 +152,7 @@ def main():
     print()
     print("Unpatched successfully. Removed:")
     print("  - command: [\"/romm-plugin/start.sh\"]       (entrypoint override)")
-    print("  - PYTHONPATH=/romm-plugin/lib:/backend      (env var)")
+    print("  - PYTHONPATH=/romm-plugin/src:/backend      (env var)")
     print("  - volumeMount romm-fast-scan-plugin → /romm-plugin")
     print("  - volume hostPath definition")
     print()

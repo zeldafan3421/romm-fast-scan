@@ -66,6 +66,7 @@ build_one() {
 
     log "building $name ($src_file -> $so_file)"
     "$CC" -shared -fPIC -O2 -std=c99 \
+        -I "$REPO_ROOT/include" \
         -o "$plugin_dir/$so_file" \
         "$src_file" \
         $LDFLAGS

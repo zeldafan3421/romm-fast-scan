@@ -22,7 +22,7 @@
  * (no -l flags needed -- no dependency beyond libc)
  */
 
-#include "../../include/romm_plugin_abi.h"
+#include "romm_plugin_abi.h"
 
 #include <stdint.h>
 #include <stdio.h>

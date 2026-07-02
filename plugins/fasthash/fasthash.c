@@ -20,7 +20,7 @@
  * (plain gcc works too; .c is valid as either C or C++ here)
  */
 
-#include "../../include/romm_plugin_abi.h"
+#include "romm_plugin_abi.h"
 
 #include <openssl/evp.h>
 #include <zlib.h>

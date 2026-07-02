@@ -142,7 +142,7 @@ def main():
             "      restartPolicy: Always\n"
             "\n"
             "      # fast-scan plugin: override entrypoint so start.sh can\n"
-            "      # compile _fasthash.so and patch roms_handler.py before boot.\n"
+            "      # compile plugins and patch roms_handler.py before boot.\n"
             "      command: [\"/romm-plugin/start.sh\"]\n"
             "\n"
             "      ports:"
@@ -158,9 +158,9 @@ def main():
         text,
         "        - name: ROMM_AUTH_SECRET_KEY\n          value:",
         (
-            "        # fast-scan plugin: makes _fasthash.so importable\n"
+            "        # fast-scan plugin: makes plugin_manager importable\n"
             "        - name: PYTHONPATH\n"
-            "          value: \"/romm-plugin/lib:/backend\"\n"
+            "          value: \"/romm-plugin/src:/backend\"\n"
             "        - name: ROMM_AUTH_SECRET_KEY\n"
             "          value:"
         ),
@@ -234,7 +234,7 @@ def main():
     print()
     print("Patched successfully. Summary of changes:")
     print("  + command: [\"/romm-plugin/start.sh\"]       (entrypoint wrapper)")
-    print("  + PYTHONPATH=/romm-plugin/lib:/backend      (makes .so importable)")
+    print("  + PYTHONPATH=/romm-plugin/src:/backend      (makes .so importable)")
     print("  + volumeMount romm-fast-scan-plugin → /romm-plugin")
     print(f"  + volume hostPath {PLUGIN_HOST_PATH}")
     print()
