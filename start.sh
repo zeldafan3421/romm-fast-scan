@@ -210,6 +210,47 @@ case ":${PYTHONPATH:-}:" in
 esac
 log "PYTHONPATH=$PYTHONPATH"
 
-# ── 4. Hand off to RomM's real entrypoint ───────────────────────────────────
+# ── 4. Apply the LIBRARY_SIZE tuning profile ─────────────────────────────────
+# LIBRARY_SIZE selects a small set of size-appropriate defaults. The whole
+# point is that the plugin stays a *pure passthrough* out of the box -- it
+# only makes scans faster and changes nothing else about RomM's behavior --
+# unless you deliberately opt into a heavier profile.
+#
+#   DEFAULT (or unset) -- INVARIANT: sets nothing at all. Inherits every RomM
+#                         default exactly as *this version of RomM* ships them.
+#                         There are deliberately no plugin-pinned constants in
+#                         this branch -- not even a "4h" -- so DEFAULT tracks
+#                         whatever RomM itself defaults to, on any version, for
+#                         ever. Stock RomM behavior, just faster hashing.
+#   LARGE              -- raises only the knobs whose RomM stock default is too
+#                         tight for a big library. Currently: SCAN_TIMEOUT.
+#
+# RomM enqueues each scan as an RQ background job with job_timeout=SCAN_TIMEOUT
+# (RomM's own config default -- 4h on today's supported versions), used for
+# both manual scans (endpoints/sockets/scan.py) and the filesystem watcher's
+# auto-rescans (watcher.py). RQ hard-kills the job at that limit -- so a
+# library that legitimately takes longer gets cut off mid-scan even though
+# nothing is wrong. LARGE raises that default to 24h.
+#
+# Every knob a profile sets uses the `${VAR:-...}` form, so an explicitly-set
+# value always wins -- the profile only supplies a smarter *default*, it never
+# overrides a choice you made yourself. Room to add more knobs to LARGE (and
+# more profiles) later without changing this contract.
+LIBRARY_SIZE="${LIBRARY_SIZE:-DEFAULT}"
+case "$LIBRARY_SIZE" in
+    DEFAULT|default)
+        log "LIBRARY_SIZE=DEFAULT (passthrough -- stock RomM behavior, just faster hashing)"
+        ;;
+    LARGE|large)
+        export SCAN_TIMEOUT="${SCAN_TIMEOUT:-86400}"
+        log "LIBRARY_SIZE=LARGE (SCAN_TIMEOUT=$SCAN_TIMEOUT; set SCAN_TIMEOUT to override)"
+        ;;
+    *)
+        log "WARNING: unknown LIBRARY_SIZE='$LIBRARY_SIZE' -- treating as DEFAULT (passthrough)."
+        log "         Known profiles: DEFAULT, LARGE. See README's \"Library size profiles\"."
+        ;;
+esac
+
+# ── 5. Hand off to RomM's real entrypoint ───────────────────────────────────
 log "Starting RomM..."
 exec /docker-entrypoint.sh /init

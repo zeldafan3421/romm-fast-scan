@@ -130,3 +130,17 @@ Every layer here must degrade to "stock RomM behavior" on any failure — this i
 - **The one deliberate exception:** signature verification does not fail open toward "use it anyway." A plugin's `.so` failing to verify against `plugins/official-signers.txt` — missing `.sig`, missing signers file, missing `ssh-keygen`, or a genuinely invalid signature, all treated the same — is refused outright unless `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` is set, full stop, not "load it and warn." This still composes with everything else in this list: a refused plugin is just another reason `plugin_manager` returns `None`, so `roms_handler.py` needs no awareness of signing at all — but it's worth being explicit that *this specific check's* fail-open direction is "don't run unverified native code," not "keep hashing fast." See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section.
 
 Never introduce a code path where a failure in this plugin could produce a *wrong* hash or block RomM from starting — silent fallback, not a hard error, is the expected behavior throughout this codebase. Signature verification is the sole intentional exception to the "always fail toward working" half of that sentence; it still never blocks RomM from starting.
+
+## `LIBRARY_SIZE` tuning profiles
+
+The plugin's contract is "make scans faster, otherwise behave **exactly** like stock RomM." `LIBRARY_SIZE` (handled in `start.sh` step 4, before the `exec`) is how anything beyond raw acceleration is offered — as an explicit, opt-in profile, never as an always-on change. Two profiles today:
+
+- **`DEFAULT`** (the value when `LIBRARY_SIZE` is unset or `DEFAULT`) — **hard invariant: this branch sets nothing.** No `export`, no plugin-pinned constants, not even a "4h". It inherits every RomM default exactly as *the RomM version you're running* ships them, so `DEFAULT` behaves identically to stock RomM on any version, forever, with nothing in this repo to drift out of date when RomM changes a default. When you touch this code, keep the `DEFAULT` branch a no-op (a `log` line is the only thing it may do) — the moment it sets a value, the passthrough guarantee is broken.
+- **`LARGE`** — raises only knobs whose RomM stock default is too tight for a big library. Currently just `SCAN_TIMEOUT`: `export SCAN_TIMEOUT="${SCAN_TIMEOUT:-86400}"` (RomM's own default is the RQ `job_timeout` for both manual scans in `endpoints/sockets/scan.py` and the watcher's auto-rescans in `watcher.py` — currently 4h — which hard-kills a scan that legitimately runs longer; `LARGE` gives it 24h).
+
+Invariants for any future profile work, hold all of them:
+1. `DEFAULT` sets nothing — it *is* whatever RomM's own defaults are for that version.
+2. Every knob a non-default profile sets uses `${VAR:-…}`, so an explicitly-set value always wins — a profile supplies a smarter *default*, never an override of the user's own choice.
+3. Only environment/config-level knobs that are trivially overridable and cannot corrupt data or block startup belong here — never signing (`FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`, a security decision) or the hash cache (`FAST_SCAN_HASH_CACHE`, a correctness tradeoff), which stay their own independent switches.
+4. An unrecognized `LIBRARY_SIZE` value warns and falls back to `DEFAULT` — a typo must never break a deployment.
+5. Document any new profile/knob in `start.sh`'s step-4 comment, `README.md`'s "Library size profiles", and here, and keep all three consistent.

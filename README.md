@@ -162,6 +162,35 @@ Set `SCAN_WORKERS` in your pod YAML based on your storage:
 
 With the GIL released, workers actually run in parallel — unlike stock RomM where extra workers above ~2 give diminishing returns.
 
+### Library size profiles (`LIBRARY_SIZE`)
+
+By default the plugin is a **pure passthrough** — it makes scans faster and changes nothing else about how RomM behaves. Some of RomM's stock defaults get in the way once a library is big enough, though, so `LIBRARY_SIZE` lets you opt into a set of size-appropriate defaults in one switch:
+
+```yaml
+- name: LIBRARY_SIZE
+  value: "LARGE"
+```
+
+| Profile | What it does |
+|---|---|
+| `DEFAULT` (or unset) | **Nothing.** Inherits *every* RomM default exactly as your RomM version ships them — just with faster hashing. The plugin sets no values in this mode, so if a future RomM changes a default, `DEFAULT` tracks it automatically. This is the passthrough contract. |
+| `LARGE` | Raises only the knobs whose RomM stock default is too tight for a big library. Currently: the scan timeout (RomM's stock value — 4h on today's supported versions — up to 24h). |
+
+**The `DEFAULT` invariant:** `DEFAULT` is *not* "the plugin's idea of good defaults" — it's "whatever RomM itself defaults to on the version you're running." The plugin never sets `SCAN_TIMEOUT` (or anything else) in `DEFAULT` mode; it leaves RomM's own config untouched. So `DEFAULT` on RomM 4.9.2 behaves exactly like stock RomM 4.9.2, `DEFAULT` on a future RomM behaves exactly like that future RomM, with no plugin-pinned constants to drift out of date.
+
+**Why `LARGE` exists:** RomM runs each scan as a background job with a hard timeout (`SCAN_TIMEOUT`, currently 4h on supported versions) and kills the job when it's exceeded — even mid-scan, even though nothing is wrong. A large library can legitimately take longer, so `LARGE` gives it 24h.
+
+Every knob a profile sets is just a smarter *default* — a value you set yourself always wins. So you can pick `LARGE` but still pin the exact timeout:
+
+```yaml
+- name: LIBRARY_SIZE
+  value: "LARGE"
+- name: SCAN_TIMEOUT
+  value: "-1"      # LARGE's 24h default, overridden to no timeout at all
+```
+
+(`SCAN_TIMEOUT=-1` means RQ never times the job out — a genuinely stuck scan would then never be auto-reaped, though RomM's manual "stop scan" still works. `14400` is stock 4h.) An unrecognized `LIBRARY_SIZE` value logs a warning and falls back to `DEFAULT`, so a typo can never break your deployment.
+
 ### Optional: skip re-reading unchanged files
 
 `Complete` and `Rescan hashes` scans normally re-read every byte of every ROM, even when nothing on disk changed. RomM already stores each file's size, mtime, and hashes. Set this env var to reuse the stored hashes whenever a file's size **and** mtime are unchanged, skipping the read entirely:

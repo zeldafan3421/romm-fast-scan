@@ -55,6 +55,13 @@ spec:
           value: changeme-auth-generate-with-openssl-rand-hex-32 # <-- change this; must NOT match either password
         - name: SCAN_WORKERS
           value: "4"   # HDD: 4-6, SATA SSD: 8-12, NVMe: 12-16 -- see README "Configuration"
+        # Tuning profile. DEFAULT (or unset) = pure passthrough: every RomM
+        # default for your RomM version is left untouched, just faster hashing.
+        # LARGE = raise size-sensitive knobs (currently the scan timeout, from
+        # RomM's stock 4h to 24h -- stops a big library being cut off mid-scan).
+        # See README "Library size profiles".
+        # - name: LIBRARY_SIZE
+        #   value: "LARGE"
         # Reuse stored hashes for files whose size+mtime are unchanged on
         # Complete / Rescan-hashes scans. Off by default; see README.
         # - name: FAST_SCAN_HASH_CACHE
