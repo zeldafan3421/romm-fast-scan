@@ -2,15 +2,17 @@
 
 ## Overview
 
-The fast-scan plugin optimizes RomM's ROM scanning via three independent tiers:
+romm-fast-scan optimizes RomM's ROM scanning through a small **native plugin system** layered on top of a resilient source patch, plus one independent opt-in cache:
 
 1. **Tier-0: Hash Cache** — reuse stored file hashes when size+mtime unchanged (opt-in, `FAST_SCAN_HASH_CACHE`)
-2. **Tier-1: C Extension** — compute CRC32/MD5/SHA1 in a single file pass with GIL released
+2. **Tier-1: Native Plugin** — compute CRC32/MD5/SHA1 in a single file pass via a signed, GIL-free C-ABI plugin
 3. **Tier-3: Pure Python** — stock RomM fallback (no optimization)
 
-(Tier-2 is the unified diff patch, a resilience mechanism.)
+(Tier-2 is the unified diff patch, a resilience mechanism for keeping the source integration working across RomM releases — see "The Source Patch" below.)
 
-Each tier is independent and fail-safe — any failure falls through to the next tier.
+Each tier is independent and fail-safe — any failure falls through to the next tier. This document covers the mechanics; see `plugins/README.md` for how to write or modify a plugin, and `CLAUDE.md` for contributor-facing conventions and the project's longer-term roadmap.
+
+**A note on history:** earlier versions of this project shipped a single CPython C-extension (`src/_fasthash.c`) that was `import`ed directly into RomM's Python process, tied to RomM's exact Python minor version and rebuilt whenever that changed. That extension has been fully removed and replaced by the plugin system described below — if you find a reference to `_fasthash`, `_fh`, or a `/romm-plugin/lib/` directory anywhere, it's stale; the current design has no CPython extension at all.
 
 ---
 
@@ -64,18 +66,41 @@ Every check is wrapped in try/except:
 - Database error (query, schema) → `None` → fall through
 - Stored hashes empty or missing → `None` → fall through
 
-**Result:** Cache can never produce a wrong hash. At worst, it's a no-op.
+**Result:** Cache can never produce a wrong hash. At worst, it's a no-op. This tier is entirely independent of the plugin system below it — it works (or doesn't) regardless of whether any plugin is loaded.
 
 ---
 
-## Tier-1: C Extension (`src/_fasthash.c`)
+## The Plugin System
 
-### Single-Pass Hashing
+### ABI Contract (`include/romm_plugin_abi.h`)
 
-The C extension computes CRC32, MD5, and SHA1 in a single pass over the file:
+A plugin is a shared library (`.so`) exposing a small, versioned C ABI — `extern "C"` functions, only primitives/fixed-size buffers/structs-of-primitives crossing the boundary, no exceptions escaping, every hook returning a status code (`0` = success, nonzero = failure). Nothing about the ABI requires C or C++: any language that can produce a proper `extern "C"`-equivalent shared library qualifies (Rust as a `cdylib`, Go with `-buildmode=c-shared`, Zig, and others, in addition to C/C++) — proven live by loading a plugin built with a bare `cc` invocation entirely outside this repo's own build tooling.
 
+Every plugin `.so` must export `romm_plugin_abi_version(void)`. The loader cross-checks this against what the plugin's `plugin.json` manifest claims *and* against what the loader itself supports — a mismatch in either direction gets the whole plugin skipped and logged, never partially loaded.
+
+Three hooks exist today:
+- **`hash_file`** — one file in, three hex digests out (`romm_hash_file`). The only hook currently wired into RomM's actual scan path.
+- **`hash_file_accum`** — an opaque-handle accumulator for combining several files into one digest (multi-disc ROMs), mirroring the shape of the old CPython extension's `MultiFileHasher` Python type but implemented as four plain C functions (`romm_hash_accum_new`/`_file`/`_finalize`/`_free`) called through `ctypes` instead of a Python class. Implemented, loads correctly, **not currently called anywhere in `roms_handler.py`** — multi-disc ROMs still hash via the stock per-file Python path today.
+- **`archive_list`** — lists a ZIP's members (name, sizes, stored CRC32) without decompressing anything. Implemented, loads correctly, **not currently wired into RomM's scan path** — exists to prove the plugin system generalizes beyond hashing, doesn't yet replace the actual decompress-and-hash work the archive branch does today.
+
+See `CLAUDE.md`'s "Roadmap: incremental backend replacement" section for where the unwired hooks (and future ones — cover/thumbnail resizing, fuzzy metadata matching are named candidates with no code yet) fit into the longer-term plan.
+
+### The Loader (`src/plugin_manager.py`)
+
+Discovers every `plugins/*/plugin.json` (finalized manifests only — a directory with just source and no finalized manifest is invisible to it), and for each one, in order:
+
+1. Verifies the `.so`'s sha256 matches what the manifest claims (tamper/corruption check)
+2. **Verifies the `.so`'s cryptographic signature** (see "Signing" below) — this is the one check in this codebase that does *not* fail open by default
+3. Verifies ABI version agreement (manifest vs binary vs what this loader supports)
+4. Loads the `.so` via `ctypes.CDLL` and binds each declared hook to a Python-callable wrapper
+
+Any failure at any step is logged and that plugin (or just that hook, if only one hook's binding fails) is skipped — never a hard error, never blocks RomM from starting. `plugin_manager.hash_file(path)` (and the other public hook-dispatch functions) return `None` on any failure or absence; callers fall back to pure Python. Because `ctypes` automatically releases Python's GIL for the duration of any foreign-function call, a plugin's C code doesn't need to do anything special to enable real parallelism across `SCAN_WORKERS` — unlike the old CPython extension, which had to manually bracket its hashing loop in `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS` since it ran *inside* the interpreter.
+
+### The `fasthash` Plugin (`plugins/fasthash/fasthash.c`)
+
+**Single-pass hashing:**
 ```c
-BUF_SIZE = 256 KB  // Read buffer
+BUF_SIZE = 256 KB  // Read buffer, a deliberate sweet spot -- don't change without re-benchmarking
 
 for each 256 KB chunk:
   crc32_update(chunk)
@@ -84,113 +109,59 @@ for each 256 KB chunk:
 
 return (crc_hex, md5_hex, sha1_hex)
 ```
+Stock Python hashes a file by calling `hashlib.md5()` then re-reading for `hashlib.sha1()`, etc. — for a large file on slow storage, reading three times is three times slower than reading once.
 
-**Why single-pass?**
-- Stock Python impl calls `hashlib.md5()`, then re-reads the file for `hashlib.sha1()`, etc.
-- For a 10 GB file on slow HDD, reading 3 times is 3× slower than reading once
+**Hash algorithms:** CRC32 via zlib; MD5 and SHA1 via OpenSSL's EVP API (`EVP_MD_CTX_copy` allows non-destructive finalization — read a digest without ending the ability to keep accumulating, needed for the multi-file accumulator hook).
 
-**Buffer size (256 KB)?**
-- Sweet spot for modern HDD/SSD (8 MB/s read speed, ~30 ms latency)
-- Larger buffers risk memory waste; smaller buffers increase syscall overhead
+**Concurrency:** `romm_hash_file`'s module-level function is stateless — each call touches only its own stack/heap, no locking needed. The multi-file accumulator's per-handle state (`AccumHandle`) *does* need locking if two threads might ever call methods on the *same* handle concurrently — protected by a `pthread_mutex_t`, a direct port of a pattern that was a real, ThreadSanitizer-confirmed data race in the old CPython-extension version before that lock existed.
 
-### GIL Release
-
-```c
-Py_BEGIN_ALLOW_THREADS
-  // Read + hash outside Python interpreter lock
-  for each chunk:
-    read(buf)
-    crc32(buf)
-    md5(buf)
-    sha1(buf)
-Py_END_ALLOW_THREADS
-```
-
-**Why this matters:**
-- Python's Global Interpreter Lock serializes CPU work across threads
-- But I/O (disk reads) and C-level hashing are CPU-bound and don't release the GIL by default
-- Explicitly releasing the GIL lets `N` workers run in parallel: worker-1 reads file-A, worker-2 reads file-B, etc.
-- Stock RomM with GIL held: 8 workers queue up, only 1 reads+hashes at a time → `SCAN_WORKERS` ineffective
-- With GIL released: 8 workers read+hash in parallel → ~8× faster (limited by disk speed, not CPU serialization)
-
-### Hash Algorithms
-
-- **CRC32:** zlib, 4-byte unsigned, stored as hex string
-- **MD5:** OpenSSL EVP API, 16 bytes → 32-char hex
-- **SHA1:** OpenSSL EVP API, 20 bytes → 40-char hex
-
-**Why OpenSSL EVP?**
-- Supports both MD5 and SHA1 with a unified API
-- `EVP_MD_CTX_copy()` allows non-destructive finalization (important for multi-file ROMs where you accumulate hashes across multiple member files)
-
-### Multi-File ROM Accumulation
-
-The C extension defines a `MultiFileHasher` Python type:
-
-```python
-mfh = MultiFileHasher()
-mfh.hash_file("file1.bin")   # Updates internal CRC/MD5/SHA1 ctxs
-mfh.hash_file("file2.bin")   # Adds to the same contexts
-mfh.hash_file("file3.bin")   # Continues accumulation
-(crc, md5, sha1) = mfh.finalize()  # Returns cumulative hashes
-```
-
-**How it works:**
-- OpenSSL `EVP_MD_CTX_copy()` duplicates a hash context without finalizing it
-- So `hash_file()` can update, copy-and-finalize to return per-file hash, then continue with the original context
-- Result: multi-file ROMs accumulate hashes across all members in one pass
-
-**Current limitation:**
-- Not used in the patched handler (single-file branch uses the C extension, multi-file branch uses Python)
-- Could be future optimization if needed
-
-### Exceptions & Fallback
-
-If the C extension raises an exception (corrupted file, permission denied, etc.):
+**Exceptions & fallback:** a C function returns nonzero on any failure (missing file, read error, hashing error) rather than raising. The Python side wraps every call in `try/except` as a second line of defense on top of that:
 ```python
 try:
-    crc_hex, md5_hex, sha1_hex = await asyncio.to_thread(
-        _fh.hash_file, path
-    )
+    result = await asyncio.to_thread(_pm.hash_file, path)
+    if result is not None:
+        f_crc_hex, f_md5_hex, f_sha1_hex = result
+        _used_fast_path = True
 except Exception:
-    # Fall back to Python hashing
-    pass
+    pass  # fall through to the Python path below
 ```
+No ROM is ever left without a hash — a plugin failure means slower, not wrong or missing.
 
-The handler catches the exception and falls back to pure Python. No ROM is left without a hash.
+### Signing
+
+Official plugins (`fasthash`, `archive-list`) are cryptographically signed at build time using `ssh-keygen -Y sign`/`-Y verify` — the same primitive `git`'s `gpg.format=ssh` commit signing uses, chosen to avoid a new Python dependency (no `cryptography`/`pynacl`; this repo's Python is stdlib-only, and `ssh-keygen` is just another external CLI tool the way `patch`/`gcc` already are).
+
+By default, `plugin_manager.py` **refuses to load any plugin that isn't signed by the official key** — this includes a plugin you build yourself from this repo's own source, since only this repo's CI holds the private key (`PLUGIN_SIGNING_KEY`, a GitHub Actions secret, never committed, never entering a Docker build context or image layer). Setting `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` opts back into the older, weaker sha256-only behavior — required for the volume-mount install path and any locally-built image, since neither can produce signed plugins. See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section for the full mechanism, including how the private key stays out of the build (a `FROM scratch` `plugins-export` Containerfile stage lets CI extract just the built `.so`s for signing before any real image build runs).
+
+This is the one check in the whole codebase that deliberately does *not* fail open toward "keep working, just slower" — an unverifiable signature fails toward "don't run this native code." It still composes with everything else here: a rejected plugin is just another reason a hook stays unavailable, and callers fall back to Python exactly as they would for any other rejection reason.
 
 ---
 
-## Tier-2: Unified Diff Patch (`roms_handler.patch`)
+## The Source Patch (`roms_handler.patch`)
 
 ### Resilience Strategy
 
-The plugin patches RomM's `roms_handler.py` to inject the fast path. Rather than embedding a hardcoded override, we use a minimal unified diff patch:
+RomM's `roms_handler.py` is patched **once** — not per-plugin, not per-hook-addition to an existing hook — to call into `plugin_manager.hash_file(...)` instead of hashing in pure Python. Adding a new plugin behind an existing hook needs zero source changes; `plugin_manager.py` already dispatches into whatever's loaded. Only wiring in a genuinely *new* hook (like `archive_list` would need, if that's ever done) requires touching `roms_handler.py` again.
 
-1. **On boot (start.sh):**
-   - Check if container's `roms_handler.py` matches a known SHA → tier-1: copy pre-patched file (exact)
-   - Otherwise, try applying `roms_handler.patch` → tier-2: patch applies, might have offsets
-   - Otherwise → tier-3: pure Python (no optimization)
+The patch itself uses the same three-tier strategy as always:
 
-2. **On RomM update (refresh.sh):**
-   - If old patch still applies to new version → regenerate SHA
-   - Otherwise → Python re-patcher regenerates the changes and builds a new patch
+1. **On boot (`start.sh`):**
+   - Container's `roms_handler.py` already contains `import plugin_manager as _pm`? → already patched (a previous boot's tier-1/tier-2 succeeded and persists across restarts of the same container, since `roms_handler.py` lives in the container's own filesystem, not a bind mount) → log success, done. Without this check, every restart after the first successful patch would otherwise re-attempt tier-1/tier-2 against an already-patched file, both of which correctly "fail" against it — this used to produce a real, misleading "Could not patch" warning claiming the fast path had been lost when it hadn't; fixed by checking for this marker first.
+   - Exact SHA match against `known_sha256.txt`? → tier-1: copy the matching `overrides/prepatched/<version>.py` verbatim (fastest, safest)
+   - `roms_handler.patch` applies via `patch --dry-run`? → tier-2: apply it (survives minor upstream changes)
+   - Neither? → tier-3: log a warning, start RomM unmodified (pure Python hashing, never blocks boot)
 
-### Why a Patch?
-
-- **Smaller diffs:** The patch is 150 lines vs a 700-line override file
-- **Readable:** Unified diff shows exactly what changed (import, tier-0 check, tier-1 call, return handling)
-- **Resilient:** Small patches survive minor upstream changes (line numbering shifts, whitespace, comments)
-- **Versionable:** Git tracks the patch changes naturally
+2. **On RomM update (`scripts/refresh.sh`):** regenerates tier-1 (a fresh pre-patched file) and tier-2 (a fresh diff) together for a new RomM version, run manually inside a live container of that version, backing up before mutating anything.
 
 ### What the Patch Injects
 
 ```python
 # After imports:
 try:
-    import _fasthash as _fh
-except ImportError:
-    _fh = None
+    import plugin_manager as _pm
+    _pm.load_plugins("/romm-plugin/plugins")
+except Exception:
+    _pm = None
 try:
     import fast_scan_cache as _fsc
 except Exception:
@@ -201,21 +172,21 @@ _DEFAULT_MD5_HEX = hashlib.md5(usedforsecurity=False).hexdigest()
 _DEFAULT_SHA1_HEX = hashlib.sha1(usedforsecurity=False).hexdigest()
 
 # Variables for tier-0/tier-1 results:
-rom_md5_hex: str | None = None   # Tier-0 or tier-1 fills this
-rom_sha1_hex: str | None = None  # (None means use tier-2/tier-3 Python hashes)
+rom_md5_hex: str | None = None   # set by plugin fast path; overrides rom_md5_h at return
+rom_sha1_hex: str | None = None
 
-# In single-file branch, replace:
-#   crc_c, rom_crc_c, md5_h, ... = await self._calculate_rom_hashes(...)
-# With:
-#   _cache_hit = await asyncio.to_thread(_fsc.cached_file_hash, ...)
-#   if _cache_hit:
-#       (tier-0 handling)
-#   elif _fh and ...:
-#       (tier-1 C handling)
+# In the single-file branch, replace the old hashing call with:
+#   _cache_hit = await asyncio.to_thread(_fsc.cached_file_hash, ...)     # tier-0
+#   if _cache_hit is not None:
+#       (use it)
 #   else:
-#       (tier-2/tier-3 Python handling)
+#       _plugin_result = await asyncio.to_thread(_pm.hash_file, path)   # tier-1
+#       if _plugin_result is not None:
+#           (use it)
+#       else:
+#           (tier-2/3 Python fallback, unchanged from stock)
 
-# At return, prefer hex overrides:
+# At return, prefer the hex overrides when set:
 md5_hash=(
     rom_md5_hex
     if rom_md5_hex is not None
@@ -223,75 +194,73 @@ md5_hash=(
 )
 ```
 
-The patch is minimal because it preserves all surrounding logic — only inserting/replacing the hashing branch.
+The patch is minimal because it preserves all surrounding logic — only inserting/replacing the hashing branch. It's regenerated by `scripts/refresh.sh` using anchor-based text insertion, not hand-maintained separately from `overrides/prepatched/*.py`; both are derived from the same source of truth for a given RomM version.
 
 ---
 
-## Boot Sequence (start.sh)
+## Boot Sequence (`start.sh`)
 
 ```
-1. Compile C extension (if not cached)
-   - Check EXT_SUFFIX (e.g., cpython-313-x86_64-linux-musl.so)
-   - apk add gcc (if available)
-   - gcc -O2 ... _fasthash.c -o $TARGET_SO
-   - apk del gcc (cleanup)
+1. Compile any plugin whose .so isn't already present
+   - For each plugins/*/plugin.json.tmpl:
+     - .so already there? → "Cached: ..." log line, skip (this is how CI's
+       pre-built-and-signed artifacts survive into the final image without
+       being silently recompiled and unsigned)
+     - Otherwise → apk add gcc/musl-dev/... if needed, compile with cc,
+       finalize plugin.json with the real sha256, apk del build tools after
 
-2. Patch roms_handler.py
-   a. Exact SHA match? Copy pre-patched file (tier-1)
-   b. Patch applies? Apply diff (tier-2)
-   c. Neither? Warn and proceed without patch (tier-3)
+2. Patch roms_handler.py (see "The Source Patch" above)
+   a. Already patched? → done
+   b. Exact SHA match? → copy pre-patched file (tier-1)
+   c. Patch applies? → apply diff (tier-2)
+   d. Neither? → warn and proceed without the fast path (tier-3)
 
-3. Set PYTHONPATH
-   - $LIB_DIR (compiled .so)
-   - $SRC_DIR (fast_scan_cache.py)
-   - $PYTHONPATH (RomM backend)
+3. Set PYTHONPATH=/romm-plugin/src:/backend
+   - src/ holds plugin_manager.py and fast_scan_cache.py
+   - plugin .so files are never imported as Python modules -- ctypes
+     dlopen's them directly -- so they don't need to be on PYTHONPATH at all
 
 4. Start RomM normally
    - exec /docker-entrypoint.sh /init
 ```
 
-Each step logs to stdout (picked up by `podman logs`). On failure, the next step either works or falls back gracefully.
+Each step logs to stdout (picked up by `podman logs`). On failure, the next step either works or falls back gracefully — nothing here can prevent RomM from starting.
 
 ---
 
-## Refresh Sequence (refresh.sh)
+## Refresh Sequence (`scripts/refresh.sh`)
 
-Used when RomM is updated and the patch no longer applies:
+Used when RomM is updated and the existing patch no longer applies cleanly:
 
 ```
-1. Record the new RomM version's SHA
-   - Fetch ROMM_VERSION from importlib.metadata
+1. Compute the new RomM version's roms_handler.py SHA256
 
 2. Try the committed patch first (tier-2)
    - patch --dry-run to check if it still applies
-   - If yes:
-     a. Apply the patch (for real)
-     b. record_version() stores the new SHA → prepatched/ file
+   - If yes: apply it for real, record the new SHA -> overrides/prepatched/
 
-3. If patch fails, Python re-patcher regenerates the changes
-   - Uses regex patterns to find and replace known anchors
-   - Injects the imports, variables, tier-0 cache check, tier-1 C call
-   - Injects the hash-skip cache logic (same as the diff patch does)
-   - Builds the full patched file in Python
+3. If the patch doesn't apply, regenerate it
+   - Anchor-based text insertion against the same set of anchors this
+     patch always uses (plugin_manager import + load_plugins() call,
+     _DEFAULT_*_HEX constants, the elif hashable_platform: branch calling
+     _pm.hash_file(...), the tier-0 cache injection)
+   - Builds the full patched file in Python, then re-derives
+     roms_handler.patch as a diff between stock and patched
 
-4. Verify the result is sensible
-   - Check _fasthash is present
-   - Check _cache_hit injection worked
+4. Verify the result
+   - grep for "plugin_manager" in the regenerated file
+   - python3 -c "import ast; ast.parse(...)" to confirm it's still valid Python
 
-5. Regenerate the unified diff patch
-   - diff original → patched, with stable headers
-   - Saves as roms_handler.patch (overwrites old one)
+5. Store the result
+   - Copy the patched file -> overrides/prepatched/<version>.py
+   - Append the SHA to known_sha256.txt (append-only; existing entries
+     for other versions are preserved)
 
-6. Store the result
-   - Copy patched file → overrides/prepatched/$VERSION.py
-   - Append SHA to known_sha256.txt (preserving existing entries)
-
-7. On next boot
-   - Exact SHA match → tier-1 copy (using the new pre-patched file)
-   - Boot is fast, no regeneration needed
+6. On next boot: exact-SHA tier-1 copy works immediately, no
+   regeneration needed for that version again
 ```
 
-**Key insight:** Multiple RomM versions are recorded in `known_sha256.txt`, so the exact-match tier-1 fast path works across every version that's ever been refreshed.
+**Key insight:** `known_sha256.txt` is the single source of truth for which RomM versions this repo supports (`scripts/list_known_versions.py` reads it) — every version anyone has ever run `refresh.sh` against stays fast-path-capable indefinitely. See CLAUDE.md's "Versioning model" and "Roadmap: incremental backend replacement" sections for how this feeds the CI build matrix and the RomM 5.\*.\* compatibility commitment.
 
 ---
 
@@ -306,7 +275,7 @@ async def get_rom_files(self, rom: Rom, calculate_hashes: bool = True):
     # ...
     elif hashable_platform:  # This is what the patch replaces
         # Tier-0: cache check (if _fsc enabled)
-        # Tier-1: C extension (if _fh available)
+        # Tier-1: plugin_manager.hash_file() (if a plugin provides the hook)
         # Tier-2/3: Python fallback
 ```
 
@@ -323,7 +292,7 @@ for rom in roms:
 await asyncio.gather(*scan_tasks)  # Run up to SCAN_WORKERS in parallel
 ```
 
-The plugin benefits from multiple workers because the GIL is released during hashing, allowing true parallelism.
+Workers actually run in parallel during hashing because `ctypes` releases the GIL for the duration of the native call into the plugin — stock RomM holds the GIL through its pure-Python hashing, so extra workers above ~2 give diminishing returns there.
 
 ---
 
@@ -352,50 +321,44 @@ The cache queries: `SELECT crc_hash, md5_hash, sha1_hash, chd_sha1_hash FROM rom
 - **Speedup vs reading file:** 10–100× (no file I/O)
 - **Applicable to:** ~100% of unchanged ROMs on second rescan
 
-### Tier-1 (C Extension)
+### Tier-1 (Native Plugin)
 
-- **Cost:** Single file read (sequential I/O) + CRC32 + MD5 + SHA1 (CPU)
-- **Speedup vs Python:** 2–5× depending on file size
-- **Applicable to:** 100% of changed ROMs, 100% of scans if cache is disabled
+- **Cost:** Single file read (sequential I/O) + CRC32 + MD5 + SHA1 (CPU), with real cross-worker parallelism
+- **Speedup vs Python:** 2–5× depending on file size and `SCAN_WORKERS`
+- **Applicable to:** 100% of changed ROMs, 100% of scans if the cache is disabled
 
 ### Tier-2/3 (Python Fallback)
 
-- **Cost:** Multiple file reads (re-read for each hash) or pure Python (with GIL held)
+- **Cost:** Multiple file reads (re-read for each hash) with the GIL held, serializing workers
 - **Speedup:** None (this is the baseline)
-- **Applicable to:** Patches that don't apply, C extension unavailable, or no optimization is possible
+- **Applicable to:** Archive files (always), or when no plugin is available/signed/loadable
 
-### Real-World Numbers (28k-game library, HDD)
-
-| Scenario | Duration | Speedup |
-|---|---|---|
-| Full rescan (unoptimized Python, 1 worker) | 90 min | 1× |
-| Full rescan (C extension, 4 workers) | 18 min | 5× |
-| Unchanged rescan (cache + C, 4 workers) | 8 min | 11× |
-| Unchanged rescan (C extension only, 4 workers) | 18 min | 5× |
-
-(Cache only applies to unchanged files; on an HDD, stat() is much faster than reading.)
+The README's "How it works" section has the current headline number from real-world testing — check there rather than trusting a stale figure hardcoded into this file, since it can drift as the plugin evolves.
 
 ---
 
 ## Known Design Limitations
 
-1. **Multi-file ROMs:** Cache and C extension both apply per-file; aggregate hash is Python-computed. Could be optimized further (not done because rare).
+1. **Multi-disc ROMs:** the `hash_file_accum` hook exists and works (proven at the plugin-loader level) but isn't wired into `roms_handler.py`'s scan path yet — multi-file ROMs hash via the stock Python path today. Named in the roadmap, not started.
 
-2. **Archive extraction:** Pure Python decompression is necessary (format-specific). The C extension can't do it.
+2. **Archive extraction:** always uses Python decompression — format-specific and not something a hashing plugin can help with directly. The `archive_list` hook (ZIP central-directory listing without decompression) exists and works but isn't wired in as a fast pre-check yet either.
 
-3. **Network storage:** Cache hits may be spurious if clock skew exists between client and server.
+3. **Network storage:** cache hits may be spurious if clock skew exists between client and server.
 
-4. **Size+mtime collision:** A file edited in-place preserving both size and mtime will not be re-hashed. This is rare but possible with specialized tools.
+4. **Size+mtime collision:** a file edited in-place preserving both size and mtime will not be re-hashed by the tier-0 cache. Rare but possible with specialized tools.
+
+5. **Self-built plugins are unsigned:** the volume-mount install path and any locally-built image (`scripts/build-image.sh`, `scripts/build-plugins.sh`) can never produce signed plugins — only this repo's CI holds the private key. `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` is required for those paths; this is intentional, not a bug, but worth knowing going in.
 
 ---
 
 ## Testing Recommendations
 
-- **Unit test:** Manually hash a file with `_fh.hash_file()` and verify output matches `hashlib`.
-- **Integration test:** Run a full rescan and verify hashes are computed correctly.
-- **Concurrency test:** Run with multiple `SCAN_WORKERS` and verify no race conditions or data corruption.
-- **Resilience test:** Upgrade RomM and run `refresh.sh`; verify the new patch applies and is used on next boot.
-- **Performance test:** Benchmark a full rescan before/after the plugin, and compare cache hit vs miss timing.
+- **Unit test:** load a plugin through the real loader and call its hook directly — `sys.path.insert(0, "src"); import plugin_manager as pm; pm.load_plugins("plugins"); pm.hash_file(path)` — compare against `hashlib`.
+- **Integration test:** run a full rescan and verify hashes are computed correctly.
+- **Concurrency test:** run with multiple `SCAN_WORKERS` and verify no race conditions or data corruption, especially if touching the multi-file accumulator's shared handle state.
+- **Resilience test:** upgrade RomM and run `refresh.sh`; verify the new patch applies and is used on next boot.
+- **Signature test:** corrupt a plugin's `.sig` or remove it; confirm it's rejected by default and loads (with a warning) under `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`.
+- **Performance test:** benchmark a full rescan before/after, and compare cache hit vs miss timing.
 
 See [TESTING.md](TESTING.md) for detailed instructions.
 
@@ -405,12 +368,19 @@ See [TESTING.md](TESTING.md) for detailed instructions.
 
 | Component | File | Purpose |
 |---|---|---|
-| C extension | `src/_fasthash.c` | Fast hashing with GIL release; CRC32/MD5/SHA1 in one pass |
-| Cache helper | `src/fast_scan_cache.py` | Opt-in hash reuse for unchanged files (tier-0) |
-| Patch | `roms_handler.patch` | Unified diff injecting tiers into RomM's handler |
+| ABI contract | `include/romm_plugin_abi.h` | The versioned C ABI every plugin implements |
+| Plugin loader | `src/plugin_manager.py` | Discovers, sha256/signature/ABI-verifies, and loads plugins via ctypes |
+| fasthash plugin | `plugins/fasthash/fasthash.c` | hash_file + hash_file_accum hooks (CRC32/MD5/SHA1) |
+| archive-list plugin | `plugins/archive-list/archive_list.c` | archive_list hook (ZIP central-directory listing) |
+| Official signers | `plugins/official-signers.txt` | Public key(s) plugin_manager.py verifies plugin signatures against |
+| Cache helper | `src/fast_scan_cache.py` | Opt-in hash reuse for unchanged files (tier-0), independent of the plugin system |
+| Patch | `roms_handler.patch` | Unified diff wiring plugin_manager.hash_file(...) into RomM's handler |
 | Pre-patched files | `overrides/prepatched/*.py` | Pre-computed handlers for known RomM versions (tier-1 exact-match) |
-| Boot entrypoint | `start.sh` | Compile C extension, patch handler, set PYTHONPATH, start RomM |
-| Refresh tool | `refresh.sh` | Regenerate patch and pre-patched files after RomM update |
-| YAML patcher | `../scripts/patch_romm_yaml.py` | Add plugin config to user's pod YAML |
-| Installer | `install.sh` | Deploy plugin files to host filesystem |
-
+| Known versions | `known_sha256.txt` | Single source of truth for which RomM versions are supported |
+| Boot entrypoint | `start.sh` | Compile/verify plugins, patch the handler, set PYTHONPATH, start RomM |
+| Refresh tool | `scripts/refresh.sh` | Regenerate the patch and pre-patched files after a RomM update |
+| Version lister | `scripts/list_known_versions.py` | Reads known_sha256.txt for CI and other tooling |
+| YAML patcher | `scripts/patch_romm_yaml.py` | Add plugin config (incl. FAST_SCAN_ALLOW_UNSIGNED_PLUGINS) to a pod YAML |
+| Installer | `scripts/install.sh` | Deploy plugin files to host filesystem |
+| Build workflow | `.github/workflows/build-container.yml` | Signs and publishes an image per known RomM version |
+| Compatibility watch | `.github/workflows/compat-watch.yml` | Weekly check for upstream RomM 5.x releases not yet covered |

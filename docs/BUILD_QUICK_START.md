@@ -48,9 +48,14 @@ podman build --build-arg BASE_IMAGE=docker.io/rommapp/romm:5.0.0-alpha.2 \
 ## Test the Image
 
 ```sh
-# Quick test (verify plugin loaded)
-podman run --rm romm:4.9.2-fast-scan \
-  python3 -c "import _fasthash; print('✓ C extension OK')"
+# Quick test (verify a plugin loaded and passes signature/ABI checks)
+podman run --rm -e FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1 romm:4.9.2-fast-scan \
+  python3 -c "
+import sys; sys.path.insert(0, '/romm-plugin/src')
+import plugin_manager as pm
+pm.load_plugins('/romm-plugin/plugins')
+print('✓ plugin OK:', pm.hash_file('/etc/hostname'))
+"
 
 # Full test with your library
 podman run -it \
@@ -59,6 +64,12 @@ podman run -it \
   -v /path/to/data:/romm/data \
   romm:4.9.2-fast-scan
 ```
+
+Plugins built by a local `podman build`/`docker build` are **unsigned** (only this
+repo's CI holds the private signing key), so `-e FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1`
+is required for a locally-built image — see `plugins/README.md`'s "Signing and
+`FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section. The published `ghcr.io` image ships
+signed plugins and doesn't need this flag.
 
 ---
 
@@ -81,7 +92,7 @@ image: ghcr.io/your-org/romm:4.9.2-fast-scan
 | Error | Cause | Fix |
 |---|---|---|
 | `no such file or directory: Dockerfile` | Using Docker without Dockerfile | `Dockerfile` now exists — retry |
-| `ELF header mismatch` | .so compiled for wrong Python | Rebuild image with correct base version |
+| Plugin refuses to load / falls back to pure Python silently | Plugin isn't signed (local build) | Set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` |
 | `Could not patch roms_handler.py` | Patch doesn't apply to this version | Run `refresh.sh` inside container, update patch |
 
 ---

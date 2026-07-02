@@ -7,16 +7,16 @@ This guide covers building a Podman/Docker image with the fast-scan plugin pre-i
 ## Overview
 
 The build files (`Containerfile` for Podman, `Dockerfile` for Docker) build a RomM image with:
-- ✅ C extension pre-compiled (no runtime compilation needed)
+- ✅ Every native plugin under `plugins/*/` pre-compiled (no runtime compilation needed)
 - ✅ Plugin files pre-installed
 - ✅ Fast boot (compilation happens once, at build time)
 - ⚠️ Pinned to a specific RomM version (e.g., 4.9.2)
-- ⚠️ Not automatically updated when RomM releases a new version
+- ✅ Kept up to date automatically: `.github/workflows/build-container.yml` rebuilds and republishes an image for **every** RomM version in `known_sha256.txt` on every push to `main` (see [Compatibility commitment](../README.md#compatibility-commitment) in README.md) — a locally-built image, of course, only reflects whatever's checked out when you run the build
 
 This is different from the volume-mount approach (in README.md), which:
 - ✅ Works with any RomM version (via three-tier patching)
 - ✅ Easy to update (just update the base image)
-- ❌ Compiles the C extension at runtime on first boot
+- ❌ Compiles plugins at runtime on first boot
 
 **Choose container build if:** You want the fastest boot and don't mind rebuilding the image for RomM updates.
 
@@ -156,15 +156,18 @@ podman build -t romm:5.0.0-fast-scan .
 
 Or use the `--build-arg` approach (see "Build for a Different Version" above).
 
-### Pre-Compiled .so May Not Match
+### Locally-Built Plugins Are Unsigned
 
-The C extension is compiled during `podman build`, using the builder container's Python version. If the final image uses a different Python version, the `.so` may not load:
+Official plugins (the ones baked into the published `ghcr.io/zeldafan3421/romm-fast-scan` images) are cryptographically signed at build time by this repo's CI. A plugin compiled by your own `podman build`/`docker build` is **not** signed — only CI holds the private signing key (`PLUGIN_SIGNING_KEY`, a GitHub Actions secret; it never enters a Docker/Podman build context). By default `plugin_manager.py` refuses to load any unsigned plugin, so a locally-built image needs:
 
+```yaml
+- name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+  value: "1"
 ```
-ImportError: ELF header: e_machine is EM_X86_64, expected EM_386
-```
 
-This is rare (RomM 4.x all use Python 3.13), but if it happens, `start.sh` will detect it and recompile at runtime.
+set in its pod YAML (or `-e FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` for a plain `run`), or every plugin will silently fall back to pure Python. See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section for the full mechanism.
+
+Unlike the old CPython-extension design, there's no Python-ABI coupling to worry about here: a compiled plugin `.so` is a plain C-ABI shared library loaded via `ctypes`, not a CPython extension, so the same build works unmodified across every RomM/Python version — there's no "wrong Python version" failure mode to fall back from.
 
 ---
 
@@ -242,30 +245,40 @@ Or, if you don't want to maintain the image:
 
 ## Multi-Stage Build Details
 
-The Containerfile uses a two-stage build:
+The Containerfile/Dockerfile use a multi-stage build:
 
 ```dockerfile
-# Stage 1: Compile the C extension (alpine base, minimal)
+# Stage 1 (builder): compile every plugin under plugins/*/. Generic Alpine --
+# doesn't need to match the RomM base image's Python at all, since a plugin
+# .so is a plain C-ABI shared library with no CPython coupling.
 FROM alpine:latest AS builder
-  # Copy src/
-  # Compile with gcc
-  # Result: _fasthash*.so
+  # Copy include/ and plugins/
+  # Compile each plugins/<name>/<name>.c with gcc, per include/romm_plugin_abi.h
+  # Finalize each plugin.json (fills in the real sha256)
+  # Result: plugins/<name>/lib<name>.so + plugins/<name>/plugin.json
+  # Skips recompiling a plugin whose .so is already present in the build
+  # context, so CI's pre-signed plugin build survives into the final image
+
+# plugins-export (FROM scratch): not part of a normal build -- only used by
+# CI to extract just the built .so files (not all of Alpine) for signing
 
 # Stage 2: Create the final RomM image
-FROM docker.io/rommapp/romm:4.9.2
-  # Copy the .so from stage 1
-  # Copy plugin files
+FROM ${BASE_IMAGE}   # e.g. docker.io/rommapp/romm:4.9.2
+  # Copy the compiled plugins/ from the builder stage
+  # Copy src/, overrides/, roms_handler.patch, known_sha256.txt, start.sh
   # Set ENTRYPOINT
 ```
 
-**Why two stages?**
-- **Smaller image:** The final image doesn't include `gcc` (just the compiled .so)
-- **Faster rebuilds:** If the base image changes, the builder stage can be skipped
-- **Isolation:** The build environment (gcc, Python dev headers) is not in the final image
+**Why a separate builder stage?**
+- **Smaller image:** The final image doesn't include `gcc`/`musl-dev` (just the compiled `.so`s)
+- **Isolation:** The build environment (gcc, dev headers) is not in the final image
+- **Version-independent:** Because plugins have no Python-ABI coupling, the builder stage is a generic `alpine:latest` — it never needs to change when `BASE_IMAGE` does
+
+**Note:** plugins compiled this way are unsigned — see "Locally-Built Plugins Are Unsigned" above.
 
 **Image size:**
 - Stock RomM 4.9.2: ~500 MB
-- With plugin: +15–20 MB (mostly the Python source + .so)
+- With plugins: +15–20 MB (mostly the Python source + the compiled `.so`s)
 
 ---
 
@@ -299,14 +312,14 @@ containers:
 ### Build Fails During Compilation
 
 ```
-gcc: error: ... _fasthash.c: No such file or directory
+gcc: error: ... fasthash.c: No such file or directory
 ```
 
-**Cause:** The `src/` directory is not in the build context.
+**Cause:** The `plugins/` or `include/` directory is not in the build context.
 
 **Solution:** Make sure you're in the repo root:
 ```sh
-ls src/_fasthash.c  # Should exist
+ls plugins/fasthash/fasthash.c include/romm_plugin_abi.h  # Should both exist
 podman build -t romm:4.9.2-fast-scan .
 ```
 
@@ -327,21 +340,26 @@ podman search rommapp/romm  # List available tags
 ### Running the Image Fails
 
 ```
-[fast-scan] Cached: /romm-plugin/lib/_fasthash...
+[fast-scan] Cached: /romm-plugin/plugins/fasthash/libfasthash.so
 [fast-scan] WARNING: Could not patch roms_handler.py.
 ```
 
-**Cause:** The pre-compiled .so doesn't match the Python version, or the patch doesn't apply.
+**Cause:** The `roms_handler.patch` doesn't apply to this RomM version (the `Cached:` line above it is normal/expected — it just means the plugin was already pre-compiled into the image).
 
 **Solution:**
-1. Check if the .so matches:
+1. Check that a plugin actually loads (requires `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` for a locally-built, unsigned image):
    ```sh
-   podman run -it romm:4.9.2-fast-scan python3 -c "import _fasthash; print('OK')"
+   podman run -it -e FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1 romm:4.9.2-fast-scan python3 -c "
+   import sys; sys.path.insert(0, '/romm-plugin/src')
+   import plugin_manager as pm
+   pm.load_plugins('/romm-plugin/plugins')
+   print('OK:', pm.hash_file('/etc/hostname'))
+   "
    ```
 
-2. If import fails, rebuild with the correct base image version.
+2. If loading fails with a signature error, set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` (locally-built images are always unsigned).
 
-3. If the patch warning appears, run refresh.sh inside the container (see "Updating for a New RomM Release" above).
+3. If the patch warning appears, run `refresh.sh` inside the container (see "Updating for a New RomM Release" above).
 
 ---
 
@@ -378,6 +396,13 @@ docker build -f MyDockerfile -t my-custom-romm:4.9.2 .
 | **Deployment** | Push to registry | Mount plugin directory |
 | **Maintenance** | Update Containerfile for new RomM | Zero maintenance |
 | **Best for** | Fixed, air-gapped deployments | Active development, frequent updates |
+
+"Rebuild image needed" above is about building your *own* image locally. If
+you're using the published `ghcr.io/zeldafan3421/romm-fast-scan:<version>-fast-scan`
+images instead, this repo's CI already rebuilds and republishes an image for
+every RomM version in `known_sha256.txt` on every push to `main` — moving to a
+new RomM release is just swapping the `image:` tag, no local rebuild required.
+See README.md's [Compatibility commitment](../README.md#compatibility-commitment).
 
 ---
 

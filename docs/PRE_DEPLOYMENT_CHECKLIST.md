@@ -25,7 +25,7 @@ Use this checklist **before deploying the plugin to your production RomM instanc
   # Check free space in plugin directory and library
   df -h /opt/romm /path/to/library
   
-  # C extension needs ~5 MB; logs during first compile may use more
+  # Native plugins need ~5 MB; logs during first compile may use more
   ```
 
 - [ ] **Read the essential documentation:**
@@ -39,7 +39,7 @@ Use this checklist **before deploying the plugin to your production RomM instanc
 
 - [ ] **Create plugin directory with correct permissions**
   ```sh
-  mkdir -p /opt/romm/fast-scan-plugin/lib
+  mkdir -p /opt/romm/fast-scan-plugin
   chmod 755 /opt/romm/fast-scan-plugin
   ```
 
@@ -48,9 +48,23 @@ Use this checklist **before deploying the plugin to your production RomM instanc
   sh install.sh
   
   # Verify files are present
-  ls -la /opt/romm/fast-scan-plugin/src/_fasthash.c
+  ls -la /opt/romm/fast-scan-plugin/plugins/fasthash/fasthash.c
+  ls -la /opt/romm/fast-scan-plugin/plugins/archive-list/archive_list.c
   ls -la /opt/romm/fast-scan-plugin/overrides/prepatched/
   ```
+
+- [ ] **If volume-mounting (self-built plugins), plan to allow unsigned plugins**
+  Plugins compiled on-host or by `scripts/build-plugins.sh` are never signed (only this
+  repo's CI holds the private signing key), and `plugin_manager.py` refuses to load an
+  unsigned plugin by default. Add this to your pod YAML now, or the plugin will silently
+  fall back to pure Python on first boot:
+  ```yaml
+  - name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+    value: "1"
+  ```
+  See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section.
+  Not needed if you're deploying the prebuilt `ghcr.io/zeldafan3421/romm-fast-scan` image —
+  those plugins are already signed.
 
 - [ ] **Patch romm.yml**
   ```sh
@@ -82,14 +96,25 @@ Use this checklist **before deploying the plugin to your production RomM instanc
   ```sh
   podman logs -f <romm-app-container-id> 2>&1 | grep -i "fast-scan"
   
-  # Expected output (one of these, in order):
-  # [fast-scan] Compiling _fasthash extension...
-  # [fast-scan] Built: /romm-plugin/lib/...
+  # Expected output (volume-mount / first-ever compile):
+  # [fast-scan] Compiling fasthash -> libfasthash.so ...
+  # [fast-scan] Built: /romm-plugin/plugins/fasthash/libfasthash.so
+  # [fast-scan] Compiling archive-list -> libarchive_list.so ...
+  # [fast-scan] Built: /romm-plugin/plugins/archive-list/libarchive_list.so
   # [fast-scan] Applied roms_handler.py patch
-  # [fast-scan] PYTHONPATH=...
+  # [fast-scan] PYTHONPATH=/romm-plugin/src:/backend
+  # [fast-scan] Starting RomM...
+  
+  # Expected output (prebuilt ghcr.io image, or any later boot):
+  # [fast-scan] All plugins cached, nothing to compile
+  # [fast-scan] Installed roms_handler.py (exact match: 4.9.2.py)
+  # [fast-scan] PYTHONPATH=/romm-plugin/src:/backend
   # [fast-scan] Starting RomM...
   
   # If you see [fast-scan] WARNING instead, the patch failed (see TROUBLESHOOTING.md)
+  # If a plugin silently never gets used, it may have failed signature verification
+  # rather than compilation — see TROUBLESHOOTING.md and plugins/README.md's
+  # "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS" section.
   ```
 
 - [ ] **Verify RomM web UI is responsive**
@@ -150,7 +175,7 @@ Use this checklist **before deploying the plugin to your production RomM instanc
 
 ## Cache Setup Phase (If Enabled)
 
-- [ ] **Enable cache in pod YAML** (optional; can skip if you want C extension only)
+- [ ] **Enable cache in pod YAML** (optional; can skip if you want the native plugin only)
   ```yaml
   - name: FAST_SCAN_HASH_CACHE
     value: "1"
@@ -213,9 +238,9 @@ Use this checklist **before deploying the plugin to your production RomM instanc
   #   Workers: N
   
   # With plugin:
-  #   First rescan: X/2 to X/5 minutes (C extension speedup)
+  #   First rescan: X/2 to X/5 minutes (native fasthash plugin speedup)
   #   With cache enabled:
-  #   Second rescan: X/10 to X/50 minutes (cache + C extension)
+  #   Second rescan: X/10 to X/50 minutes (cache + native fasthash plugin)
   
   # If slower than stock, something is wrong (see TROUBLESHOOTING.md)
   ```
@@ -240,13 +265,26 @@ Use this checklist **before deploying the plugin to your production RomM instanc
 
 ## Known Risks & Mitigations
 
-### Risk: C Extension Doesn't Compile (Impact: Medium — slower but still works)
+### Risk: Native Plugin Doesn't Compile (Impact: Medium — slower but still works)
+
+**Preconditions:** Volume-mount install only — prebuilt `ghcr.io` images ship every plugin precompiled, so this never applies to them.
 
 **Mitigation:**
 - [ ] Ensure container has internet access on first boot
-- [ ] If it fails, check logs: `podman logs <romm-app-container-id> 2>&1 | grep -i compile`
+- [ ] If it fails, check logs: `podman logs <romm-app-container-id> 2>&1 | grep -i "compile\|fast-scan"`
 - [ ] Restart the pod; the second boot may succeed if the first failed due to transient network issues
 - [ ] If persistent, you can still use the plugin (pure Python fallback)
+
+---
+
+### Risk: Plugin Not Signed (Impact: Medium — plugin silently falls back to pure Python)
+
+**Preconditions:** Volume-mount install, or a locally-built image (Option B) — either way you built the `.so` yourself, and only this repo's CI holds the private signing key, so `plugin_manager.py` refuses to load it by default.
+
+**Mitigation:**
+- [ ] Set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS: "1"` in your pod YAML before first boot
+- [ ] If you'd rather not run unsigned native code, extract the already-signed `.so`+`.sig` out of the published `ghcr.io` image instead of rebuilding (`podman cp`/`docker cp`)
+- [ ] See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section
 
 ---
 
@@ -349,7 +387,7 @@ Your deployment is successful when:
 ✅ RomM starts without errors (check logs)  
 ✅ Scans complete without errors (check logs)  
 ✅ Hashes are correct (verified against manual `md5sum` on a few files)  
-✅ Performance improved (C extension: 2–5× faster; cache: 5–10× faster on second scan)  
+✅ Performance improved (native `fasthash` plugin: 2–5× faster; cache: 5–10× faster on second scan)  
 ✅ No new warnings or exceptions in logs  
 ✅ Database integrity is maintained (no duplicate entries, hashes don't jump around)  
 

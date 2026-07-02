@@ -6,7 +6,7 @@
 
 ## Installation Issues
 
-### `cp: cannot create directory '/opt/romm/fast-scan-plugin/lib': Permission denied`
+### `cp: cannot create directory '/opt/romm/fast-scan-plugin/plugins': Permission denied`
 
 **Cause:** The plugin directory is owned by a different user or has restrictive permissions.
 
@@ -58,9 +58,9 @@ python3 /path/to/patch_romm_yaml.py /home/manager/deployments/romm/romm.yml
 
 ## Startup Issues
 
-### `[fast-scan] Compiling _fasthash extension ... Compile failed`
+### `[fast-scan] Cannot install build tools -- plugins unavailable, using pure Python fallback`
 
-**Cause:** `gcc` or required headers (`openssl-dev`, `zlib-dev`, `musl-dev`) are not available.
+**Cause:** `gcc`/`cc` or required headers (`openssl-dev`, `zlib-dev`, `musl-dev`) are not available. Only applies to the volume-mount install — prebuilt `ghcr.io` images ship every plugin precompiled and never hit this.
 
 **Possible reasons:**
 - Container has no internet access (can't `apk add`)
@@ -80,30 +80,62 @@ RUN apk add --no-cache gcc musl-dev openssl-dev zlib-dev
 # Option 3: Accept pure Python fallback
 # RomM will work normally, just 3–5× slower
 # Once working, you can update the image and remove gcc
+
+# Option 4: Switch to the prebuilt ghcr.io image instead (see README.md
+# "Option A: use the published image") -- every plugin ships precompiled
 ```
 
 **Impact:** RomM scans at pure Python speeds. Not an error — graceful fallback.
 
 ---
 
+### `[fast-scan] Compile failed for <plugin> -- that hook falls back to pure Python`
+
+**Cause:** `cc` ran but compilation of that specific plugin's `.c` file failed (e.g. missing a header the `case`-statement link flags don't cover, or a genuinely broken source file).
+
+**Solution:** Check the full startup logs for the underlying compiler error — `start.sh` discards `cc`'s stderr by default, so you may need to run the same `cc` invocation manually inside the container (see `plugins/README.md`'s "Building" section) to see the actual error.
+
+**Impact:** Only that plugin's hook(s) fall back to pure Python; other plugins are unaffected.
+
+---
+
 ### `[fast-scan] Applied roms_handler.py patch` but plugin is slow
 
-**Cause:** The patch was applied, but the C extension may not have compiled successfully (check logs).
+**Cause:** The patch was applied, but a plugin's `.so` may not have compiled, may have failed sha256/ABI verification, or — new in this project's current design — may have been rejected for not being signed (check logs).
 
 **Solution:** Check the full startup logs:
 ```sh
-podman logs <romm-app-container-id> 2>&1 | grep -i "fasthash\|compile\|fast-scan"
+podman logs <romm-app-container-id> 2>&1 | grep -i "fasthash\|compile\|signed\|signature\|fast-scan"
 ```
 
-If you see `Compile failed`:
+If you see `Compile failed for ...`:
 - Verify internet access and try restarting the pod
-- Or, check if the `.so` is present: `ls /romm-plugin/lib/_fasthash*.so`
+- Or, check if the `.so` is present: `ls /romm-plugin/plugins/fasthash/libfasthash.so`
+
+If you don't see a compile failure but the plugin still isn't used, it may be a signature rejection rather than a compile failure — see "Plugin loads but isn't used (signature rejected)" below.
+
+---
+
+### Plugin loads but isn't used (signature rejected)
+
+**Cause:** `plugin_manager.py` refuses to load any plugin that isn't signed by the official key by default — this includes a plugin you compiled yourself from this repo's own unmodified source, since only this repo's CI holds the private `PLUGIN_SIGNING_KEY`. This applies to the volume-mount install and any locally-built image (Option B); it does not apply to the prebuilt `ghcr.io` image, which ships already-signed plugins.
+
+**Symptom:** No `Compile failed` in the logs, the `.so` exists on disk, but hashing still runs at pure-Python speed, or `plugin_manager.loaded_hooks()` doesn't list the hook you expect.
+
+**Solution:** Set `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS: "1"` in your pod YAML and restart:
+```yaml
+- name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+  value: "1"
+```
+See `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section for the full mechanism and why self-built plugins need this even when built from this repo's own source unmodified.
 
 ---
 
 ### `WARNING: Could not patch roms_handler.py`
 
 **Cause:** RomM was updated to a version the plugin doesn't recognize, and the unified diff patch no longer applies.
+
+**Note:** `start.sh` checks whether `roms_handler.py` is already patched (looks for `import plugin_manager as _pm`) before attempting tier-1/tier-2, and logs `roms_handler.py already patched (plugin_manager integration present)` and returns immediately if so. This means a plain container **restart** after a successful boot should never re-trigger this warning — if you see it after a restart with no RomM version change, that's unexpected and worth reporting; it should only appear after an actual RomM upgrade changes `roms_handler.py`.
 
 **Solution:**
 ```sh
@@ -167,19 +199,22 @@ The `refresh.sh` script will:
    - Restart and rescan
    - If hashes stabilize, it was a cache issue (report this)
 
-3. **Corrupted .so or import error:**
+3. **Corrupted `.so` or failed load/verification:**
    ```sh
    podman exec <romm-app-container-id> python3 -c "
-     import _fasthash
-     print('C extension OK')
-   " 2>&1 || echo "C extension failed — check logs"
+     import sys
+     sys.path.insert(0, '/romm-plugin/src')
+     import plugin_manager as pm
+     pm.load_plugins('/romm-plugin/plugins')
+     print('Loaded hooks:', pm.loaded_hooks())
+   " 2>&1 || echo "plugin_manager failed — check logs"
    ```
 
 **Solution:**
 - Verify the file hasn't changed: `md5sum /path/to/rom.rom` before and after a scan
-- If the file is stable but hashes differ, delete the `.so` and recompile:
+- If the file is stable but hashes differ, delete the plugin `.so`+`plugin.json` and let `start.sh` recompile:
   ```sh
-  podman exec <romm-app-container-id> rm -f /romm-plugin/lib/_fasthash*.so
+  podman exec <romm-app-container-id> rm -f /romm-plugin/plugins/fasthash/libfasthash.so /romm-plugin/plugins/fasthash/plugin.json
   podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
   ```
 
@@ -280,7 +315,7 @@ The plugin doesn't corrupt the DB (it only reads and writes standard RomM column
 
 **Possible causes:**
 
-1. **C extension not being used:** Check tier (see [EDGE_CASES.md](EDGE_CASES.md) § "How to Check Which Tier Is Active").
+1. **Native plugin not being used:** Check tier (see [EDGE_CASES.md](EDGE_CASES.md) § "How to Check Which Tier Is Active") — also check whether it was rejected for being unsigned (see "Plugin loads but isn't used (signature rejected)" above).
 
 2. **SCAN_WORKERS too low:** Check the setting in your pod YAML.
    ```yaml
@@ -293,7 +328,7 @@ The plugin doesn't corrupt the DB (it only reads and writes standard RomM column
 4. **Unrelated RomM slowness:** Check if other parts of RomM are slow (metadata fetching, UI).
 
 **Solution:**
-- Verify the C extension is active: `podman logs <romm-app-container-id> 2>&1 | grep -E "Built:|Cached:"`
+- Verify the native plugin is active: `podman logs <romm-app-container-id> 2>&1 | grep -E "Built:|Cached:|All plugins cached"`
 - Increase `SCAN_WORKERS` if appropriate for your storage
 - Benchmark a single 1 GB file against pure Python (see [TESTING.md](TESTING.md))
 
@@ -358,7 +393,7 @@ This will:
 
 **Cause:** The new RomM version's `roms_handler.py` structure doesn't match expected anchors.
 
-**Solution:** The fast path (C extension) still works — only the cache is disabled. This is safe.
+**Solution:** The fast path (native `fasthash` plugin) still works — only the cache is disabled. This is safe.
 
 To fix, open an issue on the repo with:
 - Your RomM version

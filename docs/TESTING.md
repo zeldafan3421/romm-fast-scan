@@ -3,7 +3,7 @@
 ## Overview
 
 This plugin modifies two critical paths in RomM:
-1. **File hashing** — the C extension `_fasthash` computes CRC32/MD5/SHA1 with GIL release
+1. **File hashing** — `roms_handler.py` calls `plugin_manager.hash_file(...)`, which dispatches into the native `fasthash` plugin (a plain C-ABI `.so` loaded via `ctypes`, not a CPython extension) to compute CRC32/MD5/SHA1. `ctypes` automatically releases the GIL for the duration of the call, so `SCAN_WORKERS` threads run genuinely concurrently.
 2. **Hash storage** — the cache helper reuses stored hashes for unchanged files
 
 Both are designed to fail safely (fall back to pure Python), but comprehensive testing before production use is strongly recommended.
@@ -14,13 +14,19 @@ Both are designed to fail safely (fall back to pure Python), but comprehensive t
 
 ### 1. Installation & Startup
 
-**Test: plugin boots and compiles the C extension**
+**Test: plugin boots and compiles the native plugins**
 
 ```sh
 # On the host:
 sh install.sh
 # Copy romm.yml and patch it
 python3 ../scripts/patch_romm_yaml.py
+
+# Volume-mount / self-built plugins aren't signed -- add this or they
+# won't load (see plugins/README.md's "Signing and
+# FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"):
+#   - name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+#     value: "1"
 
 # Restart the pod
 podman pod stop romm-pod && podman pod rm romm-pod
@@ -29,43 +35,54 @@ podman play kube romm.yml
 
 **Expected output in logs:**
 ```
-[fast-scan] Compiling _fasthash extension for cpython-313-x86_64-linux-musl.so ...
-[fast-scan] Built: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so
+[fast-scan] Compiling fasthash -> libfasthash.so ...
+[fast-scan] Built: /romm-plugin/plugins/fasthash/libfasthash.so
+[fast-scan] Compiling archive-list -> libarchive_list.so ...
+[fast-scan] Built: /romm-plugin/plugins/archive-list/libarchive_list.so
 [fast-scan] Applied roms_handler.py patch
-[fast-scan] PYTHONPATH=/romm-plugin/lib:/romm-plugin/src:/backend
+[fast-scan] PYTHONPATH=/romm-plugin/src:/backend
 [fast-scan] Starting RomM...
 ```
 
-**On second boot (cached .so):**
+**On second boot (cached .so, or any boot of a prebuilt `ghcr.io` image):**
 ```
-[fast-scan] Cached: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so
+[fast-scan] All plugins cached, nothing to compile
 [fast-scan] Installed roms_handler.py (exact match: 4.9.2.py)
 ```
 
 **Common startup failures:**
-- `Compiling _fasthash extension ... Compile failed` → `apk` or compiler unavailable; RomM falls back to pure Python (acceptable, slower)
+- `Cannot install build tools -- plugins unavailable, using pure Python fallback` → `apk`/compiler unavailable; RomM falls back to pure Python (acceptable, slower)
+- `Compile failed for <plugin> -- that hook falls back to pure Python` → that plugin's hook is unavailable this boot
 - `Could not patch roms_handler.py` → version mismatch; RomM falls back to pure Python
+- A plugin compiles fine but never gets used → check whether it was rejected for being unsigned (see TROUBLESHOOTING.md)
 
 ---
 
-### 2. Hashing (Tier-2: C fast path)
+### 2. Hashing (native `fasthash` plugin fast path)
 
-**Test: C extension is actually used for single files**
+**Test: the native plugin is actually used for single files**
 
 ```sh
 podman exec <romm-app-container-id> sh -c '
   python3 -c "
-    import _fasthash as fh
+    import sys
+    sys.path.insert(0, \"/romm-plugin/src\")
+    import plugin_manager as pm
+    pm.load_plugins(\"/romm-plugin/plugins\")
     # Hash a real ROM file in the library
-    crc, md5, sha1 = fh.hash_file(\"/path/to/a/rom.rom\")
-    print(f\"CRC: {crc}\")
-    print(f\"MD5: {md5}\")
-    print(f\"SHA1: {sha1}\")
+    result = pm.hash_file(\"/path/to/a/rom.rom\")
+    if result is None:
+      print(\"hash_file() returned None -- plugin unavailable\")
+    else:
+      crc, md5, sha1 = result
+      print(f\"CRC: {crc}\")
+      print(f\"MD5: {md5}\")
+      print(f\"SHA1: {sha1}\")
   " 2>&1
 '
 ```
 
-**Expected:** hex strings, one per hash type, no errors.
+**Expected:** hex strings, one per hash type, no errors, and not `None`.
 
 **Verify against Python hashlib to confirm correctness:**
 ```python
@@ -76,7 +93,7 @@ with open("/path/to/a/rom.rom", "rb") as f:
     print(hashlib.sha1(data).hexdigest())
 ```
 
-Should match the C extension output exactly.
+Should match the native plugin's output exactly.
 
 ---
 
@@ -84,7 +101,7 @@ Should match the C extension output exactly.
 
 **Test: archive files (`.zip`, `.7z`) always use Python decompression**
 
-In the RomM web UI, trigger a scan of a platform that has multi-file ROMs or archives. Check the logs — you should not see decompression errors. Archives should hash successfully via the Python fallback, not the C extension.
+In the RomM web UI, trigger a scan of a platform that has multi-file ROMs or archives. Check the logs — you should not see decompression errors. Archives should hash successfully via the Python fallback, not the native plugin.
 
 **Verify:** extract an archive manually and compute hashes on its members; RomM should report the same hashes for the archive.
 
@@ -174,13 +191,20 @@ This requires instrumentation or external profiling. For a basic check:
 
 **Test: multiple workers actually run in parallel**
 
+The native `fasthash` plugin isn't a CPython extension at all — it's a plain
+C-ABI `.so` called through `ctypes`, which releases the GIL automatically for
+the duration of any foreign-function call. There's no manual
+`Py_BEGIN_ALLOW_THREADS` in the plugin's C source (unlike the old `_fasthash.c`
+CPython extension this replaced) — it's simply not part of the interpreter's
+execution model in the first place.
+
 ```sh
 # Set 8 workers in your pod YAML
 # Run a scan on a platform with 1000+ games on HDD
 
 # Monitor CPU usage while scanning:
-# - With GIL released: multiple cores should be busy (>200% in top)
-# - Stock RomM (GIL locked): mostly one core busy (100% in top)
+# - With the native plugin (GIL released by ctypes): multiple cores should be busy (>200% in top)
+# - Stock RomM (GIL held by pure-Python hashing): mostly one core busy (100% in top)
 ```
 
 **Measure with time:**
@@ -204,16 +228,16 @@ Compare 4 workers vs 1 worker on your library:
 
 ## Automated / Scripted Testing
 
-### Test: C extension builds on fresh container
+### Test: native plugins build on fresh container
 
 ```sh
 # Build a fresh RomM container and mount the plugin
 podman run --rm -v /opt/romm/fast-scan-plugin:/romm-plugin \
   docker.io/rommapp/romm:latest \
-  /romm-plugin/start.sh 2>&1 | grep -E "Built:|Cached:|Compile failed"
+  /romm-plugin/start.sh 2>&1 | grep -E "Built:|Cached:|All plugins cached|Compile failed"
 ```
 
-**Expected:** `Built: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so`
+**Expected:** `Built: /romm-plugin/plugins/fasthash/libfasthash.so` (and the same for `archive-list`).
 
 ---
 
@@ -285,22 +309,25 @@ podman exec <romm-app-container-id> sh -c '
 
 ## Performance Benchmarking
 
-### Benchmark 1: C extension vs pure Python
+### Benchmark 1: native plugin vs pure Python
 
 **Setup:**
 - Disable cache: `FAST_SCAN_HASH_CACHE=0`
 - Pick a ROM file (100 MB–1 GB ideal)
 
-**Measure C extension:**
+**Measure the native plugin:**
 ```sh
 podman exec <romm-app-container-id> python3 << 'EOF'
-import time, _fasthash
+import sys, time
+sys.path.insert(0, "/romm-plugin/src")
+import plugin_manager as pm
+pm.load_plugins("/romm-plugin/plugins")
 path = "/path/to/test.rom"
 t0 = time.time()
 for _ in range(10):
-    crc, md5, sha1 = _fasthash.hash_file(path)
+    crc, md5, sha1 = pm.hash_file(path)
 elapsed = time.time() - t0
-print(f"C extension (10 runs): {elapsed:.2f}s ({elapsed/10:.3f}s per run)")
+print(f"Native plugin (10 runs): {elapsed:.2f}s ({elapsed/10:.3f}s per run)")
 EOF
 ```
 
@@ -328,7 +355,7 @@ print(f"Python (10 runs): {elapsed:.2f}s ({elapsed/10:.3f}s per run)")
 EOF
 ```
 
-**Expected:** C extension 2–5× faster depending on file size and disk speed.
+**Expected:** Native plugin 2–5× faster depending on file size and disk speed.
 
 ---
 
@@ -369,11 +396,11 @@ Start two scans simultaneously in RomM (if the UI allows):
 podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 # Wait for startup
 sleep 10
-# Verify .so is cached and reused
-podman logs <romm-app-container-id> | grep "Cached:"
+# Verify the .so files are cached and reused
+podman logs <romm-app-container-id> | grep -E "All plugins cached|Cached:"
 ```
 
-**Expected:** second startup uses cached .so (instant, not recompiled).
+**Expected:** second startup logs `All plugins cached, nothing to compile` (instant, not recompiled).
 
 ---
 
@@ -395,7 +422,8 @@ If you encounter unexpected behavior or want to confirm normal operation, record
 
 - **Hash cache edge case:** a file edited in place to preserve both size and mtime will not be re-hashed (rare; documented in EDGE_CASES.md)
 - **Multi-file ROMs:** the cache only applies to single-file ROMs, not multi-disc or archive ROMs
-- **Network storage:** the C extension should work fine on NFS, but mtime rounding may differ between client and server, causing cache misses
+- **Network storage:** the native plugin should work fine on NFS, but mtime rounding may differ between client and server, causing cache misses
+- **Signing:** a plugin you compile yourself (volume-mount install, or `scripts/build-plugins.sh`) is unsigned and won't load unless `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1` is set — see `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" section
 - **Symbolic links:** the plugin follows symlinks (standard behavior), but cache hits depend on stable inode/mtime, which may change if symlinks are re-created
 
 See [EDGE_CASES.md](EDGE_CASES.md) for full details.
