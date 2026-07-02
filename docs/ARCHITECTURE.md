@@ -96,6 +96,8 @@ Discovers every `plugins/*/plugin.json` (finalized manifests only — a director
 
 Any failure at any step is logged and that plugin (or just that hook, if only one hook's binding fails) is skipped — never a hard error, never blocks RomM from starting. `plugin_manager.hash_file(path)` (and the other public hook-dispatch functions) return `None` on any failure or absence; callers fall back to pure Python. Because `ctypes` automatically releases Python's GIL for the duration of any foreign-function call, a plugin's C code doesn't need to do anything special to enable real parallelism across `SCAN_WORKERS` — unlike the old CPython extension, which had to manually bracket its hashing loop in `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS` since it ran *inside* the interpreter.
 
+**Per-call cost of the `ctypes` path.** Dispatching through `ctypes` (libffi + the per-call Python wrapper that allocates the output buffers and encodes/decodes the strings) costs slightly more per call than the old CPython extension did — the old one called through the native C-API and built its result in C. Measured by `tests/call_overhead.py`: ~2 µs new-vs-old differential per `hash_file` call, which is <1% of hash time above ~130 KiB and only a few percent on very small carts. It's the deliberate, understood cost of dropping CPython-ABI coupling (see CLAUDE.md's "Why `ctypes`, and what it costs"), not a regression; the wrapper is the optimizable part if it ever matters.
+
 ### The `fasthash` Plugin (`plugins/fasthash/fasthash.c`)
 
 **Single-pass hashing:**
@@ -292,7 +294,7 @@ for rom in roms:
 await asyncio.gather(*scan_tasks)  # Run up to SCAN_WORKERS in parallel
 ```
 
-Workers actually run in parallel during hashing because `ctypes` releases the GIL for the duration of the native call into the plugin — stock RomM holds the GIL through its pure-Python hashing, so extra workers above ~2 give diminishing returns there.
+Workers overlap during hashing because `ctypes` releases the GIL for the duration of the native call into the plugin. This is a *smaller* edge than it sounds: stock RomM's `hashlib`/`zlib` already release the GIL during the actual hash computation, so the plugin's win is the reduced per-file Python overhead, not a jump from "fully serialized" to "parallel." See the measured, reproducible numbers in `tests/` — the speedup is modest and workload-dependent, not a large multiplier.
 
 ---
 
@@ -323,8 +325,8 @@ The cache queries: `SELECT crc_hash, md5_hash, sha1_hash, chd_sha1_hash FROM rom
 
 ### Tier-1 (Native Plugin)
 
-- **Cost:** Single file read (sequential I/O) + CRC32 + MD5 + SHA1 (CPU), with real cross-worker parallelism
-- **Speedup vs Python:** 2–5× depending on file size and `SCAN_WORKERS`
+- **Cost:** Single file read (sequential I/O) + CRC32 + MD5 + SHA1 (CPU)
+- **Speedup vs Python:** modest and workload-dependent — measured (warm cache, `tests/benchmark.py`) at ~parity for a single file, up to ~1.5–1.6× on many-small-file libraries at high `SCAN_WORKERS`, near-parity on few-large-file libraries, and less on cold spinning disk (I/O-bound). Not a large multiplier; run `sh tests/run.sh` for numbers on your hardware.
 - **Applicable to:** 100% of changed ROMs, 100% of scans if the cache is disabled
 
 ### Tier-2/3 (Python Fallback)

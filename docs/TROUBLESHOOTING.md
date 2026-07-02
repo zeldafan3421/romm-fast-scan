@@ -78,7 +78,8 @@ RUN apk add --no-cache gcc musl-dev openssl-dev zlib-dev
 # Then rebuild your image
 
 # Option 3: Accept pure Python fallback
-# RomM will work normally, just 3–5× slower
+# RomM will work normally, just somewhat slower on large scans
+# (modest, workload-dependent -- see tests/ for measured figures)
 # Once working, you can update the image and remove gcc
 
 # Option 4: Switch to the prebuilt ghcr.io image instead (see README.md

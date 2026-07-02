@@ -192,7 +192,7 @@ Difference:    > 1e-6  ✓ cache miss (correct)
 2. Falls back to tier-3: pure Python hashing (no native plugin used)
 3. Logs a warning: `"WARNING: Could not patch roms_handler.py."`
 
-**Impact:** RomM still starts and scans normally, but at pure-Python speeds (3–5× slower than with the native `fasthash` plugin).
+**Impact:** RomM still starts and scans normally, at pure-Python speeds — modestly slower than the native plugin on large scans (workload-dependent; see `tests/` for measured figures), never broken.
 
 **Mitigation:** Run `refresh.sh` inside the container to regenerate the patch and SHAs for the new version:
 ```sh

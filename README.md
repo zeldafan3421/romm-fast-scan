@@ -8,17 +8,19 @@ Committed to supporting every RomM **5.\*.\*** backend release, indefinitely —
 
 ## How it works
 
-RomM computes CRC32, MD5, and SHA1 hashes for every ROM file during a scan. The original implementation does this in pure Python, which means the GIL serializes all workers even when `SCAN_WORKERS > 1` — extra workers don't actually run in parallel.
-
-`roms_handler.py` is patched to call `plugin_manager.hash_file(path)` instead of hashing in Python directly. `plugin_manager` loads whichever native plugins are present under `plugins/*/` (see [`plugins/README.md`](plugins/README.md) for the full contract) and dispatches into them via `ctypes` — no Python C-API, no CPython ABI coupling, so a compiled plugin works unmodified across every RomM/Python version. The bundled `fasthash` plugin:
+RomM computes CRC32, MD5, and SHA1 hashes for every ROM file during a scan, in pure Python. `roms_handler.py` is patched to call `plugin_manager.hash_file(path)` instead. `plugin_manager` loads whichever native plugins are present under `plugins/*/` (see [`plugins/README.md`](plugins/README.md) for the full contract) and dispatches into them via `ctypes` — no Python C-API, no CPython ABI coupling, so a compiled plugin works unmodified across every RomM/Python version. The bundled `fasthash` plugin:
 
 - Computes all three hashes in a **single file pass** using a 256 KB read buffer
-- Has no GIL to release in the first place — it's a plain shared library, not a CPython extension, so scan worker threads calling into it run genuinely concurrently by default
+- Runs the whole read-and-hash of a file in one native call. `ctypes` releases the GIL for the duration of that call, so scan worker threads calling into it run concurrently — and it avoids the per-chunk Python overhead the stock path pays on every file
 - Falls back transparently to the original Python path for archive files (`.zip`, `.7z`, `.rar`, etc.) that require decompression, or if no plugin provides the `hash_file` hook at all
 
-The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/O simultaneously. Every layer fails open: a missing plugin, a corrupt `.so`, an ABI mismatch, or a plugin call itself failing all fall back to plain Python hashing — never a wrong hash, never a blocked scan.
+Every layer fails open: a missing plugin, a corrupt `.so`, an ABI mismatch, or a plugin call itself failing all fall back to plain Python hashing — never a wrong hash, never a blocked scan.
 
-**Observed speedup on a 28,000-game library:** ~3–5× faster full rescan with 4 workers on HDD; higher on SSD.
+**Performance — what to actually expect.** The honest answer is *modest, and it depends on your library and hardware* — not a big headline multiplier. Both the stock and plugin paths ultimately hash with the same OpenSSL primitives (Python's `hashlib`/`zlib` already release the GIL during the hash math itself), so there is **no single-file speedup** — one file at a time, the plugin is about the same as stock. The win comes from cutting per-file Python overhead when hashing *many* files across `SCAN_WORKERS`, and it concentrates in libraries made of many small files.
+
+Measured warm-cache (CPU-bound, the *best case*) with this repo's reproducible suite ([`tests/`](tests/README.md)) on a 9-core VM: ~parity at 1 worker, up to **~1.5–1.6× on a many-small-file library at 4–8 workers**, and near-parity on few-large-file libraries. A first-time scan of a large library on a spinning disk is **I/O-bound** — both paths read the same bytes off the same disk — so the field speedup there is *lower* than these figures, not higher. Run `sh tests/run.sh` to reproduce on your own hardware.
+
+For the biggest real-world win on *rescans*, the separate opt-in [hash cache](#optional-skip-re-reading-unchanged-files) (`FAST_SCAN_HASH_CACHE`) matters far more than raw hashing speed — it skips re-reading unchanged files entirely.
 
 ---
 
@@ -160,7 +162,7 @@ Set `SCAN_WORKERS` in your pod YAML based on your storage:
 | HDD | 4–6 |
 | Network (NFS/SMB) | 4–8 |
 
-With the GIL released, workers actually run in parallel — unlike stock RomM where extra workers above ~2 give diminishing returns.
+More workers help most on many-small-file libraries and fast storage; on a single spinning disk, scans are I/O-bound and extra workers past a handful give little. See [How it works](#how-it-works) for measured figures.
 
 ### Library size profiles (`LIBRARY_SIZE`)
 
@@ -366,6 +368,12 @@ romm-fast-scan/
 │   ├── romm.release.yml         Ready-to-deploy pod YAML (Option A/B image swap)
 │   ├── docker-compose.yml       Ready-to-deploy Compose file (same, Compose form)
 │   └── romm.patched.example.yml Illustrative volume-mount result (Advanced install)
+│
+├── tests/                       Synthetic correctness + benchmark suite (sh tests/run.sh)
+│   ├── correctness.py           Native output == hashlib/zlib/zipfile reference
+│   ├── benchmark.py             Reproducible native-vs-Python hashing benchmark
+│   ├── fixtures.py              Deterministic synthetic ROM-shaped test data
+│   └── run.sh                   Builds plugins, runs the suite
 │
 └── Other:
     ├── LICENSE                  AGPL-3.0

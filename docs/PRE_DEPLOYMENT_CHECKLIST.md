@@ -387,7 +387,7 @@ Your deployment is successful when:
 ✅ RomM starts without errors (check logs)  
 ✅ Scans complete without errors (check logs)  
 ✅ Hashes are correct (verified against manual `md5sum` on a few files)  
-✅ Performance improved (native `fasthash` plugin: 2–5× faster; cache: 5–10× faster on second scan)  
+✅ Performance improved (native `fasthash` plugin: modest, workload-dependent — see `tests/`; the opt-in hash cache helps far more on *rescans* by skipping unchanged files)  
 ✅ No new warnings or exceptions in logs  
 ✅ Database integrity is maintained (no duplicate entries, hashes don't jump around)  
 
