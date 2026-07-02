@@ -8,9 +8,16 @@ import zlib
 from dataclasses import dataclass
 
 try:
-    import _fasthash as _fh
-except ImportError:
-    _fh = None
+    import plugin_manager as _pm
+    _pm.load_plugins("/romm-plugin/plugins")
+except Exception:
+    # Broader than ImportError on purpose: a broken plugin_manager or a
+    # bad load_plugins() call must never prevent roms_handler.py itself
+    # from importing -- that would block RomM from starting at all,
+    # worse than just losing the fast path. load_plugins() is designed
+    # to never raise on its own (bad plugins are logged and skipped),
+    # this is a second line of defense.
+    _pm = None
 try:
     import fast_scan_cache as _fsc
 except Exception:
@@ -338,7 +345,7 @@ class FSRomsHandler(FSHandler):
         rom_md5_h = hashlib.md5(usedforsecurity=False) if calculate_hashes else None
         rom_sha1_h = hashlib.sha1(usedforsecurity=False) if calculate_hashes else None
         rom_ra_h = ""
-        rom_md5_hex: str | None = None   # set by _fh fast path; overrides rom_md5_h at return
+        rom_md5_hex: str | None = None   # set by plugin fast path; overrides rom_md5_h at return
         rom_sha1_hex: str | None = None
 
         rom_dir = Path(abs_fs_path, rom.fs_name)
@@ -558,13 +565,19 @@ class FSRomsHandler(FSHandler):
                 )
             else:
                 _used_fast_path = False
-                if _fh is not None and rom_ext not in ARCHIVE_READERS:
-                    # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass
+                if _pm is not None and rom_ext not in ARCHIVE_READERS:
+                    # Native plugin path: GIL-released CRC32+MD5+SHA1 in one
+                    # pass, via whatever hash_file-hook plugin is loaded
+                    # (see plugins/README.md). plugin_manager itself fails
+                    # open (returns None) rather than raising, but the
+                    # try/except stays as a second line of defense.
                     try:
-                        f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(
-                            _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))
+                        _plugin_result = await asyncio.to_thread(
+                            _pm.hash_file, str(Path(abs_fs_path, rom.fs_name))
                         )
-                        _used_fast_path = True
+                        if _plugin_result is not None:
+                            f_crc_hex, f_md5_hex, f_sha1_hex = _plugin_result
+                            _used_fast_path = True
                     except Exception:
                         pass  # fall through to Python path below
 
@@ -581,7 +594,7 @@ class FSRomsHandler(FSHandler):
                         ),
                     )
                 else:
-                    # Python path: archive files, or _fh unavailable/failed
+                    # Python path: archive files, or no plugin available/failed
                     try:
                         crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (
                             await asyncio.to_thread(
