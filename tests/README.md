@@ -34,6 +34,16 @@ dir and are cleaned up on exit (~1 GiB peak).
   reproduction of RomM's own single-pass Python hashing, under RomM's
   concurrency model (`asyncio.to_thread` + a `SCAN_WORKERS`-sized
   semaphore), at matched worker counts. Prints a markdown table.
+- **`call_overhead.py`** — the fixed *per-call* cost of the `ctypes` path,
+  decomposed (bare FFI floor / native call+I/O / full Python wrapper). The
+  plugin used to be a CPython extension called through the native C-API;
+  it's now a `.so` called via `ctypes`, which costs a little more per call
+  (measured **~2 µs new-vs-old differential** on the dev VM — the Python
+  wrapper the old extension avoided, plus the libffi floor). This exists so
+  that trade is a committed number, not a hand-wave, and so it isn't
+  mistaken for a regression: it's <1% of hash time on anything but very
+  small ROMs, and the deliberate price of zero CPython-ABI coupling. See
+  CLAUDE.md's "Why `ctypes`, and what it costs" note.
 
 ## How to read the benchmark honestly (this is the point)
 

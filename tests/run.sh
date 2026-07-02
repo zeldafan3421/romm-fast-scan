@@ -3,9 +3,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # One command to reproduce this repo's correctness + performance claims:
 #
-#   sh tests/run.sh                 # correctness + benchmark
+#   sh tests/run.sh                 # correctness + benchmark + call-overhead
 #   sh tests/run.sh correctness     # just correctness
-#   sh tests/run.sh benchmark       # just the benchmark
+#   sh tests/run.sh benchmark       # just the throughput benchmark
+#   sh tests/run.sh overhead        # just the per-call overhead microbench
 #
 # It builds the plugins from source (scripts/build-plugins.sh) and runs with
 # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1, because a locally-built plugin is
@@ -43,8 +44,14 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "correctness" ]; then
 fi
 
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "benchmark" ]; then
-    echo "== benchmark =="
+    echo "== benchmark (throughput) =="
     python3 "$SCRIPT_DIR/benchmark.py" "$FIXTURES" || rc=$?
+    echo ""
+fi
+
+if [ "$WHAT" = "all" ] || [ "$WHAT" = "overhead" ]; then
+    echo "== call overhead (ctypes vs old CPython-extension design) =="
+    python3 "$SCRIPT_DIR/call_overhead.py" || rc=$?
 fi
 
 exit "$rc"

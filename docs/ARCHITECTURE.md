@@ -96,6 +96,8 @@ Discovers every `plugins/*/plugin.json` (finalized manifests only — a director
 
 Any failure at any step is logged and that plugin (or just that hook, if only one hook's binding fails) is skipped — never a hard error, never blocks RomM from starting. `plugin_manager.hash_file(path)` (and the other public hook-dispatch functions) return `None` on any failure or absence; callers fall back to pure Python. Because `ctypes` automatically releases Python's GIL for the duration of any foreign-function call, a plugin's C code doesn't need to do anything special to enable real parallelism across `SCAN_WORKERS` — unlike the old CPython extension, which had to manually bracket its hashing loop in `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS` since it ran *inside* the interpreter.
 
+**Per-call cost of the `ctypes` path.** Dispatching through `ctypes` (libffi + the per-call Python wrapper that allocates the output buffers and encodes/decodes the strings) costs slightly more per call than the old CPython extension did — the old one called through the native C-API and built its result in C. Measured by `tests/call_overhead.py`: ~2 µs new-vs-old differential per `hash_file` call, which is <1% of hash time above ~130 KiB and only a few percent on very small carts. It's the deliberate, understood cost of dropping CPython-ABI coupling (see CLAUDE.md's "Why `ctypes`, and what it costs"), not a regression; the wrapper is the optimizable part if it ever matters.
+
 ### The `fasthash` Plugin (`plugins/fasthash/fasthash.c`)
 
 **Single-pass hashing:**
