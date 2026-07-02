@@ -3,7 +3,7 @@
 ## Overview
 
 This plugin modifies two critical paths in RomM:
-1. **File hashing** — `roms_handler.py` calls `plugin_manager.hash_file(...)`, which dispatches into the native `fasthash` plugin (a plain C-ABI `.so` loaded via `ctypes`, not a CPython extension) to compute CRC32/MD5/SHA1. `ctypes` automatically releases the GIL for the duration of the call, so `SCAN_WORKERS` threads run genuinely concurrently.
+1. **File hashing** — `roms_handler.py` calls `plugin_manager.hash_file(...)`, which dispatches into the native `fasthash` plugin (a plain C-ABI `.so` loaded via `ctypes`, not a CPython extension) to compute CRC32/MD5/SHA1 in a single GIL-free native call per file. (The stock Python path already releases the GIL during the hash math itself, so the plugin's benefit is the lower per-file Python overhead, not a serialized-vs-parallel jump — see `tests/` for the measured, modest speedup.)
 2. **Hash storage** — the cache helper reuses stored hashes for unchanged files
 
 Both are designed to fail safely (fall back to pure Python), but comprehensive testing before production use is strongly recommended.
@@ -355,7 +355,7 @@ print(f"Python (10 runs): {elapsed:.2f}s ({elapsed/10:.3f}s per run)")
 EOF
 ```
 
-**Expected:** Native plugin 2–5× faster depending on file size and disk speed.
+**Expected:** modest, workload-dependent — ~parity for a single file, up to ~1.5–1.6× on many-small-file libraries at high `SCAN_WORKERS` (warm cache), near-parity on few-large-file libraries, less on cold spinning disk. See `tests/README.md`; `sh tests/run.sh` reproduces these numbers. Do not expect a large multiplier.
 
 ---
 
