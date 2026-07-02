@@ -1,0 +1,181 @@
+# Writing a romm-fast-scan plugin
+
+A plugin is a plain C shared library (`.so`) plus a `plugin.json` manifest.
+It has no Python.h, no CPython ABI coupling, and no dependency on which
+RomM version or Python minor version it will run alongside — build it once
+per (arch, libc) target and it works everywhere, forever. This is what
+lets `roms_handler.py` get patched **once** (see `../roms_handler.patch`)
+to call into `plugin_manager.hash_file(...)` instead of needing a new
+source patch every time the hashing implementation changes.
+
+See `../include/romm_plugin_abi.h` for the full, authoritative contract —
+this file is a guide to using it, not a copy of it.
+
+## The rules (non-negotiable)
+
+1. Every exported function is `extern "C"`. Only primitives, fixed-size
+   buffers, and structs of primitives cross the boundary — no STL, no
+   exceptions escaping a plugin function (catch in the plugin, return a
+   status code).
+2. Every hook function returns a status code: `0` = success, nonzero =
+   failure. `src/plugin_manager.py` treats *any* nonzero return (or the
+   `.so` failing to load at all) as "this plugin isn't available" and
+   falls back to the existing pure-Python path. A plugin can only make a
+   scan slower by being absent or broken; it can never make RomM produce
+   a wrong hash or fail to start.
+3. Never crash the process on bad input — a missing file, a truncated
+   archive, a corrupt image. Return nonzero (or `NULL` for a handle-based
+   hook) instead. A real segfault in a plugin still takes down the whole
+   RomM worker process, same as anywhere else in a shared library; this
+   contract only holds if your code actually honors it.
+4. Every `.so` exports `romm_plugin_abi_version(void)` returning
+   `ROMM_PLUGIN_ABI_VERSION`. The loader checks this *and* cross-checks it
+   against the `abi_version` claimed in `plugin.json` before calling
+   anything else in your plugin — get either wrong and the whole plugin is
+   skipped and logged, not partially loaded.
+
+## Directory layout
+
+```
+plugins/
+  <name>/
+    <name>.c              Source. Whatever you want, as long as the
+                           exported symbols match what plugin.json declares.
+    plugin.json.tmpl       Manifest template, committed to git. "sha256": null.
+    plugin.json             ) Build artifacts. Gitignored -- regenerated
+    lib<name>.so            ) by every build (scripts/build-plugins.sh,
+                             ) start.sh's compile_plugins(), or the
+                             ) Containerfile's builder stage).
+```
+
+`plugin.json.tmpl` is the source of truth for everything except the
+`sha256`, which necessarily depends on the exact compiled bytes (compiler
+version, flags, target) and can't be known ahead of a build:
+
+```json
+{
+  "name": "fasthash",
+  "abi_version": 1,
+  "so_file": "libfasthash.so",
+  "sha256": null,
+  "hooks": {
+    "hash_file": {
+      "entry_symbol": "romm_hash_file"
+    }
+  }
+}
+```
+
+A build step (see below) reads the template, compiles the source, computes
+the real `sha256` of the result, and writes the finalized `plugin.json`
+next to the `.so`. **Never hand-edit a finalized `plugin.json`** — if the
+`sha256` doesn't match the actual file on disk byte-for-byte, the loader
+refuses to load it (this is the whole point: a cheap tamper/corruption
+check before any of your code ever runs).
+
+## The three hook shapes today
+
+Pick whichever matches what you're building; add a new one to
+`romm_plugin_abi.h` (bump `ROMM_PLUGIN_ABI_VERSION`) if none fit.
+
+- **`hash_file`** — one file in, three hex digests out via caller-provided
+  buffers. See `fasthash/fasthash.c`'s `romm_hash_file`.
+- **`hash_file_accum`** — an opaque-handle accumulator for hashing several
+  files into one combined digest (multi-disc ROMs). Four symbols per
+  plugin.json (`new`/`file`/`finalize`/`free`), all declared under one
+  `entry_symbols` object rather than a single `entry_symbol` string. See
+  `fasthash/fasthash.c`'s `romm_hash_accum_*` family — note the
+  per-handle `pthread_mutex_t`: if two threads might ever call methods on
+  the *same* handle concurrently (they shouldn't, by design, but plugin
+  code should be defensive), the handle's own state needs locking. A
+  data race here was a real, ThreadSanitizer-confirmed bug in the
+  CPython-extension version this was ported from before that lock
+  existed — don't drop it if you touch this pattern.
+- **`archive_list`** — another opaque-handle hook, this one for listing a
+  ZIP's members (name, sizes, stored CRC32) without decompressing
+  anything. See `archive-list/archive_list.c`. Good reference for a
+  hook whose result is a *variable-length* collection rather than a
+  fixed set of output buffers: `open` returns a handle, `entry_count`
+  and `entry_at(handle, index, &out)` let the caller pull results one
+  struct at a time, `close` frees it.
+
+## Building
+
+```sh
+sh ../scripts/build-plugins.sh              # every plugin
+sh ../scripts/build-plugins.sh fasthash     # just one
+```
+
+This is exactly what `start.sh` does at container boot (self-contained,
+not by shelling out to this script) and what the `Containerfile`'s builder
+stage does at image-build time — all three read the same
+`plugin.json.tmpl`, compile with the same `-I ../include` flag, and
+finalize `plugin.json` with the real `sha256` afterward. If your plugin
+needs extra link flags (a library beyond libc), add a `case` arm for its
+name in all three places — `fasthash`'s `-lssl -lcrypto -lz -lpthread` is
+the existing example to copy.
+
+Manually, without the helper:
+
+```sh
+gcc -shared -fPIC -O2 -std=c99 -I ../include -o libyourname.so yourname.c [-lwhatever]
+sha256sum libyourname.so   # paste into plugin.json's "sha256" field
+```
+
+No `python3-dev`, no `python-config`, no per-Python-minor-version rebuild
+— that whole problem belonged to the old single CPython extension this
+system replaced, and doesn't apply to a plain C-ABI `.so` at all.
+
+## Testing a new plugin
+
+There's no test framework wired into this repo (see `CLAUDE.md`'s
+"No automated test suite" note) — testing here means the same
+manual/behavioral verification used throughout: compile it, load it
+through the real `plugin_manager.py`, and compare its output against a
+trusted reference (`hashlib`, `zipfile`, PIL, whatever's authoritative for
+what you're implementing). The loop that was actually used to build and
+verify `fasthash` and `archive-list`:
+
+1. `sh scripts/build-plugins.sh yourplugin`
+2. From the repo root:
+   ```python
+   import sys; sys.path.insert(0, "src")
+   import plugin_manager as pm
+   pm.load_plugins("plugins")
+   print(pm.loaded_hooks())   # your hook should be in this list
+   ```
+3. Compare output against a trusted reference for several real inputs,
+   including edge cases (empty file, missing file, malformed input) —
+   every one of those should come back `None` through `plugin_manager`,
+   never raise.
+4. If your hook can be exercised concurrently (the way `SCAN_WORKERS`
+   calls `hash_file` from multiple threads simultaneously), stress-test
+   it under load; if it has any shared mutable state across calls (like
+   `hash_file_accum`'s handle), specifically try to race two threads
+   against the *same* handle and confirm it doesn't corrupt or crash
+   (ThreadSanitizer if you have it available; a heavy concurrent-call
+   loop checking for hangs/wrong output is the fallback used here when
+   TSan wasn't reliably available in the sandbox this was built in).
+5. Confirm the loader's safety nets actually work for your plugin
+   specifically: corrupt its `sha256` in `plugin.json` (should skip,
+   logged, not loaded) and its `abi_version` (same).
+
+## Adding the hook to `roms_handler.py` (only for a genuinely new hook)
+
+If you're adding a plugin behind an **existing** hook (a faster
+`hash_file` implementation, say), you're done — `plugin_manager.py`
+already calls into it, and `roms_handler.py` never needs to change again.
+
+If you're wiring in a **new** hook that RomM's source doesn't call yet,
+that's the one case that still needs a `roms_handler.py` (or
+`resources_handler.py`, etc.) source patch — same three-tier process as
+everything else in this repo (`known_sha256.txt` / `overrides/prepatched/`
+/ `roms_handler.patch`, regenerated via `scripts/refresh.sh`). See
+`../CLAUDE.md`'s "three-tier patch strategy" section for how that works.
+`archive_list` in this repo is deliberately *not* wired into
+`roms_handler.py` yet — it's proven at the plugin-system level (compiles,
+loads, matches `zipfile` exactly) but doesn't yet replace anything RomM's
+scan path currently does, since listing a ZIP's stored metadata isn't a
+drop-in replacement for the actual decompress-and-hash work the archive
+branch does today. Wiring it in as a fast pre-check would be exactly this
+kind of new-hook integration, if it's ever wanted.

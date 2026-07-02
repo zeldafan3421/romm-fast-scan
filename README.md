@@ -1,6 +1,6 @@
 # romm-fast-scan
 
-A drop-in scanning performance plugin for [RomM](https://github.com/rommapp/romm) that replaces the pure-Python file hashing path with a C extension that releases the GIL, enabling genuine parallel hashing across scan workers.
+A drop-in scanning performance plugin for [RomM](https://github.com/rommapp/romm) built on a small native-plugin system: RomM's `roms_handler.py` is patched **once** to call into `plugin_manager.py`, which loads plain C-ABI `.so` plugins at runtime. The first plugin, `fasthash`, replaces RomM's pure-Python file hashing with GIL-released native CRC32/MD5/SHA1, enabling genuine parallel hashing across scan workers.
 
 Verified against **RomM 4.9.2** and **5.0.0-alpha.2**. Includes tooling to stay compatible across updates.
 
@@ -10,13 +10,13 @@ Verified against **RomM 4.9.2** and **5.0.0-alpha.2**. Includes tooling to stay 
 
 RomM computes CRC32, MD5, and SHA1 hashes for every ROM file during a scan. The original implementation does this in pure Python, which means the GIL serializes all workers even when `SCAN_WORKERS > 1` — extra workers don't actually run in parallel.
 
-This plugin compiles a small C extension (`_fasthash.c`) — either baked into a prebuilt image at build time, or inside the container on first boot if you volume-mount it onto the stock image instead. The extension:
+`roms_handler.py` is patched to call `plugin_manager.hash_file(path)` instead of hashing in Python directly. `plugin_manager` loads whichever native plugins are present under `plugins/*/` (see [`plugins/README.md`](plugins/README.md) for the full contract) and dispatches into them via `ctypes` — no Python C-API, no CPython ABI coupling, so a compiled plugin works unmodified across every RomM/Python version. The bundled `fasthash` plugin:
 
 - Computes all three hashes in a **single file pass** using a 256 KB read buffer
-- Calls `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` to **release the GIL** during I/O and hashing
-- Falls back transparently to the original Python path for archive files (`.zip`, `.7z`, `.rar`, etc.) that require decompression
+- Has no GIL to release in the first place — it's a plain shared library, not a CPython extension, so scan worker threads calling into it run genuinely concurrently by default
+- Falls back transparently to the original Python path for archive files (`.zip`, `.7z`, `.rar`, etc.) that require decompression, or if no plugin provides the `hash_file` hook at all
 
-The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/O simultaneously.
+The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/O simultaneously. Every layer fails open: a missing plugin, a corrupt `.so`, an ABI mismatch, or a plugin call itself failing all fall back to plain Python hashing — never a wrong hash, never a blocked scan.
 
 **Observed speedup on a 28,000-game library:** ~3–5× faster full rescan with 4 workers on HDD; higher on SSD.
 
@@ -32,7 +32,7 @@ The result is that `SCAN_WORKERS` threads actually run in parallel on CPU and I/
 
 ## Installation
 
-The plugin is a container image swap: change one line in your existing config, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships the C extension precompiled instead of compiling it on first boot.
+The plugin is a container image swap: change one line in your existing config, restart. `start.sh` — the same three-tier patching described below — still runs at every boot inside the image, so you keep the same graceful-fallback behavior either way; the image just ships every plugin precompiled instead of compiling them on first boot.
 
 **Starting from scratch?** Pick whichever deployment style you'd use for RomM anyway — every one of these already points at the published image, ready to fill in and run:
 
@@ -73,13 +73,13 @@ Then point `image:` at the local tag (`localhost/romm:4.9.2-fast-scan`) instead 
 Either option: on first boot you'll see
 
 ```
-[fast-scan] Cached: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so
+[fast-scan] All plugins cached, nothing to compile
 [fast-scan] Installed roms_handler.py (exact match: 4.9.2.py)
-[fast-scan] PYTHONPATH=/romm-plugin/lib:/romm-plugin/src:/backend
+[fast-scan] PYTHONPATH=/romm-plugin/src:/backend
 [fast-scan] Starting RomM...
 ```
 
-`Cached:` (not `Compiling:`) confirms the extension came precompiled with the image — there's no build step at container startup.
+`All plugins cached` confirms every plugin came precompiled with the image — there's no build step at container startup.
 
 ---
 
@@ -89,14 +89,14 @@ Either option: on first boot you'll see
 
 This path stays fully supported, with no warning, as **the go-to way to try the plugin on a RomM version this repo hasn't published an image for yet** — e.g. right after a new RomM release, before someone's built and pushed a matching `X.Y.Z-fast-scan` tag. It's also still available if you specifically want to keep running `docker.io/rommapp/romm:latest` directly (auto-tracking upstream without picking a version-pinned tag) — pass `--allow-deprecated` to `patch_romm_yaml.py` if you're doing that against a supported version; tracking `:latest` itself is never blocked, since the version can't be determined ahead of time.
 
-Unlike Option A/B, this volume-mounts the plugin onto the stock image, so the C extension compiles inside the container on first boot instead of at image-build time — and if the version turns out to be new enough that the committed patch doesn't apply cleanly, it's the same `refresh.sh` workflow (see [Staying up to date with RomM](#staying-up-to-date-with-romm) below) that's used to generate the patch for the next official image in the first place.
+Unlike Option A/B, this volume-mounts the plugin onto the stock image, so plugins compile inside the container on first boot instead of at image-build time — and if the version turns out to be new enough that the committed patch doesn't apply cleanly, it's the same `refresh.sh` workflow (see [Staying up to date with RomM](#staying-up-to-date-with-romm) below) that's used to generate the patch for the next official image in the first place.
 
 ### 1. Deploy plugin files to your server
 
 ```sh
 # On the machine running RomM:
-mkdir -p /opt/romm/fast-scan-plugin/lib
-cp -r src overrides start.sh roms_handler.patch known_sha256.txt \
+mkdir -p /opt/romm/fast-scan-plugin
+cp -r src overrides include plugins start.sh roms_handler.patch known_sha256.txt \
       /opt/romm/fast-scan-plugin/
 cp scripts/refresh.sh /opt/romm/fast-scan-plugin/
 chmod +x /opt/romm/fast-scan-plugin/start.sh /opt/romm/fast-scan-plugin/refresh.sh
@@ -118,7 +118,7 @@ python3 scripts/patch_romm_yaml.py
 
 It first checks the `image:` tag in your `romm.yml`. If that RomM version already has a published fast-scan image, it stops there and prints the `image:` swap to use instead (pass `--allow-deprecated` to proceed anyway). Otherwise — the expected case for this path — it backs up your existing `romm.yml` and adds three things:
 - `command: ["/romm-plugin/start.sh"]` — runs the plugin before RomM starts
-- `PYTHONPATH=/romm-plugin/lib:/backend` — makes the compiled `.so` importable
+- `PYTHONPATH=/romm-plugin/src:/backend` — makes `plugin_manager` importable (plugin `.so` files themselves are loaded by absolute path via `ctypes`, not through `PYTHONPATH`)
 - A `hostPath` volume mount for the plugin directory
 
 See `examples/romm.patched.example.yml` for the full expected result.
@@ -132,14 +132,16 @@ podman pod stop romm-pod && podman pod rm romm-pod && podman play kube romm.yml
 On **first boot** you'll see log lines like:
 
 ```
-[fast-scan] Compiling _fasthash extension for cpython-313-x86_64-linux-musl.so ...
-[fast-scan] Built: /romm-plugin/lib/_fasthash.cpython-313-x86_64-linux-musl.so
+[fast-scan] Compiling fasthash -> libfasthash.so ...
+[fast-scan] Built: /romm-plugin/plugins/fasthash/libfasthash.so
+[fast-scan] Compiling archive-list -> libarchive_list.so ...
+[fast-scan] Built: /romm-plugin/plugins/archive-list/libarchive_list.so
 [fast-scan] Applied roms_handler.py patch
-[fast-scan] PYTHONPATH=/romm-plugin/lib:/backend
+[fast-scan] PYTHONPATH=/romm-plugin/src:/backend
 [fast-scan] Starting RomM...
 ```
 
-Subsequent boots skip compilation (the `.so` is cached on the host volume).
+Subsequent boots skip compilation (each plugin's `.so` is cached on the host volume).
 
 ---
 
@@ -165,7 +167,7 @@ With the GIL released, workers actually run in parallel — unlike stock RomM wh
   value: "1"
 ```
 
-On an unchanged library this turns a full rescan from "read every byte" into a stat pass — minutes instead of hours on an HDD. It composes with the C extension, which still accelerates the files that actually changed.
+On an unchanged library this turns a full rescan from "read every byte" into a stat pass — minutes instead of hours on an HDD. It composes with the fasthash plugin, which still accelerates the files that actually changed.
 
 **Default off** — it's opt-in because a file edited in place that preserves both its size and mtime (rare; some sync tools do this) would not be re-hashed. It is fail-safe: any problem (disabled, unavailable, file changed, no stored record) falls back to reading and hashing the file normally, so it can never produce a wrong hash. Scope: single-file ROMs; multi-disc and archive ROMs always hash normally.
 
@@ -216,9 +218,9 @@ Removing a version doesn't break anything — `start.sh` just falls back to tier
 
 If anything goes wrong, RomM still starts normally:
 
-- Volume-mount install: if `gcc` is unavailable and `_fasthash.so` isn't cached → pure Python hashing. Prebuilt images (Option A/B) never hit this — the extension is already compiled into the image.
+- Volume-mount install: if a compiler is unavailable and a plugin's `.so` isn't cached → that hook falls back to pure Python. Prebuilt images (Option A/B) never hit this — every plugin is already compiled into the image.
 - If the patch fails to apply → stock `roms_handler.py`, no fast path
-- If `_fasthash` raises an exception at import or call time → falls back to Python per-file
+- If a plugin's `.so` fails a sha256/ABI-version check, fails to load, or a call into it fails → `plugin_manager` returns `None` and the caller falls back to Python, same as if no plugin were installed at all
 
 No ROM data is ever at risk.
 
@@ -251,7 +253,7 @@ This:
 
 Omit the `romm.yml` argument to only remove the plugin directory and leave your pod YAML as-is (you'll see a reminder with the command to run later). To revert just the YAML without touching the plugin directory, run `python3 scripts/unpatch_romm_yaml.py /path/to/romm.yml` directly.
 
-**Either way:** hashes already computed by the C extension are ordinary CRC32/MD5/SHA1 values — RomM doesn't know or care they came from the plugin, so nothing needs to be re-scanned after uninstalling.
+**Either way:** hashes already computed by the fasthash plugin are ordinary CRC32/MD5/SHA1 values — RomM doesn't know or care they came from the plugin, so nothing needs to be re-scanned after uninstalling.
 
 ---
 
@@ -261,9 +263,19 @@ Omit the `romm.yml` argument to only remove the plugin directory and leave your 
 romm-fast-scan/
 ├── README.md                    Main documentation entry point
 │
-├── Plugin Code:
+├── Plugin System:
+│   ├── include/
+│   │   └── romm_plugin_abi.h    The C-ABI contract every plugin implements
+│   ├── plugins/
+│   │   ├── README.md            Plugin authoring guide (start here to add a plugin)
+│   │   ├── fasthash/            hash_file + hash_file_accum hooks (CRC32/MD5/SHA1)
+│   │   │   ├── fasthash.c
+│   │   │   └── plugin.json.tmpl
+│   │   └── archive-list/        archive_list hook (ZIP central-directory listing)
+│   │       ├── archive_list.c
+│   │       └── plugin.json.tmpl
 │   ├── src/
-│   │   ├── _fasthash.c          C extension: CRC32 + MD5 + SHA1 with GIL release
+│   │   ├── plugin_manager.py    ctypes loader: discovers, verifies, and calls into plugins
 │   │   └── fast_scan_cache.py   Opt-in hash-skip cache (FAST_SCAN_HASH_CACHE)
 │   ├── overrides/
 │   │   └── prepatched/          Pre-patched handlers, one per known RomM version
@@ -284,6 +296,7 @@ romm-fast-scan/
 │   ├── patch_romm_yaml.py        Patches your romm.yml in-place (with backup)
 │   ├── unpatch_romm_yaml.py      Reverts romm.yml to stock (with backup)
 │   ├── build-image.sh            Container image builder helper
+│   ├── build-plugins.sh          Compiles plugins/*/*.c and finalizes plugin.json
 │   ├── run-docker.sh             Run RomM + plugin with plain `docker run`, no config file
 │   ├── run-podman.sh             Run RomM + plugin with plain `podman run`, no config file
 │   ├── refresh.sh                Re-generates patch after a RomM update
@@ -296,9 +309,10 @@ romm-fast-scan/
 │
 └── Other:
     ├── LICENSE                  AGPL-3.0
-    ├── NOTICE                   Derivative work attribution
-    └── lib/                     Compiled .so lands here at runtime (gitignored)
+    └── NOTICE                   Derivative work attribution
 ```
+
+Compiled plugin `.so` files and their finalized `plugin.json` (with a real `sha256`, computed at build time) are build artifacts, not committed — same treatment `lib/*.so` had for the old single extension. `plugins/*/plugin.json.tmpl` is the committed template each build fills in.
 
 ---
 
