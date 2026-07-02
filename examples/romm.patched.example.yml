@@ -16,7 +16,7 @@ spec:
       restartPolicy: Always
 
       # ── fast-scan plugin: override entrypoint ───────────────────────────
-      # start.sh compiles _fasthash.so on first boot, patches roms_handler.py,
+      # start.sh compiles plugins on first boot, patches roms_handler.py,
       # then calls the normal /docker-entrypoint.sh /init.
       command: ["/romm-plugin/start.sh"]
 
@@ -47,9 +47,9 @@ spec:
         # Complete / Rescan-hashes scans. Off by default; see README.
         # - name: FAST_SCAN_HASH_CACHE
         #   value: "1"
-        # ── fast-scan plugin: make _fasthash.so importable ────────────────
+        # ── fast-scan plugin: make plugin_manager importable ──────────────
         - name: PYTHONPATH
-          value: "/romm-plugin/lib:/backend"
+          value: "/romm-plugin/src:/backend"
 
       volumeMounts:
         - name: library-folder

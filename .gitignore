@@ -8,3 +8,9 @@ romm.yml
 romm.*.yml
 !romm.patched.example.yml
 !romm.release.yml
+
+# Plugin build artifacts (source .c and plugin.json.tmpl templates are
+# tracked; the compiled .so and the finalized plugin.json -- with a real
+# sha256 that changes every rebuild -- are not, same as lib/*.so above).
+plugins/*/*.so
+plugins/*/plugin.json

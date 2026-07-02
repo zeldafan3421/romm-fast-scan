@@ -1,0 +1,19 @@
+{
+  "name": "fasthash",
+  "abi_version": 1,
+  "so_file": "libfasthash.so",
+  "sha256": null,
+  "hooks": {
+    "hash_file": {
+      "entry_symbol": "romm_hash_file"
+    },
+    "hash_file_accum": {
+      "entry_symbols": {
+        "new": "romm_hash_accum_new",
+        "file": "romm_hash_accum_file",
+        "finalize": "romm_hash_accum_finalize",
+        "free": "romm_hash_accum_free"
+      }
+    }
+  }
+}

@@ -89,17 +89,24 @@ import sys, re
 src = open(sys.argv[1]).read()
 out = src
 
-# ── Insert _fh import after `import zlib` ────────────────────────────────────
+# ── Insert plugin_manager import after `import zlib` ─────────────────────────
 IMPORT_ANCHOR = "import zlib\nfrom dataclasses"
 IMPORT_INSERT = (
     "import zlib\n"
     "\ntry:\n"
-    "    import _fasthash as _fh\n"
-    "except ImportError:\n"
-    "    _fh = None\n"
+    "    import plugin_manager as _pm\n"
+    '    _pm.load_plugins("/romm-plugin/plugins")\n'
+    "except Exception:\n"
+    "    # Broader than ImportError on purpose: a broken plugin_manager or a\n"
+    "    # bad load_plugins() call must never prevent roms_handler.py itself\n"
+    "    # from importing -- that would block RomM from starting at all,\n"
+    "    # worse than just losing the fast path. load_plugins() is designed\n"
+    "    # to never raise on its own (bad plugins are logged and skipped),\n"
+    "    # this is a second line of defense.\n"
+    "    _pm = None\n"
     "from dataclasses"
 )
-if "_fasthash" not in out:
+if "plugin_manager" not in out:
     count = out.count(IMPORT_ANCHOR)
     if count == 1:
         out = out.replace(IMPORT_ANCHOR, IMPORT_INSERT, 1)
@@ -124,7 +131,7 @@ if "_DEFAULT_MD5_HEX" not in out:
 RA_ANCHOR = '        rom_ra_h = ""\n'
 RA_REPLACE = (
     '        rom_ra_h = ""\n'
-    '        rom_md5_hex: str | None = None   # set by _fh fast path; overrides rom_md5_h at return\n'
+    '        rom_md5_hex: str | None = None   # set by plugin fast path; overrides rom_md5_h at return\n'
     '        rom_sha1_hex: str | None = None\n'
 )
 if "rom_md5_hex" not in out:
@@ -161,18 +168,24 @@ OLD_BRANCH_PATTERN = re.compile(
 NEW_BRANCH_HEADER = (
     "        elif hashable_platform:\n"
     "            _used_fast_path = False\n"
-    "            if _fh is not None and rom_ext not in ARCHIVE_READERS:\n"
-    "                # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass\n"
+    "            if _pm is not None and rom_ext not in ARCHIVE_READERS:\n"
+    "                # Native plugin path: GIL-released CRC32+MD5+SHA1 in one\n"
+    "                # pass, via whatever hash_file-hook plugin is loaded\n"
+    "                # (see plugins/README.md). plugin_manager itself fails\n"
+    "                # open (returns None) rather than raising, but the\n"
+    "                # try/except stays as a second line of defense.\n"
     "                try:\n"
-    "                    f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(\n"
-    "                        _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))\n"
+    "                    _plugin_result = await asyncio.to_thread(\n"
+    "                        _pm.hash_file, str(Path(abs_fs_path, rom.fs_name))\n"
     "                    )\n"
-    "                    _used_fast_path = True\n"
+    "                    if _plugin_result is not None:\n"
+    "                        f_crc_hex, f_md5_hex, f_sha1_hex = _plugin_result\n"
+    "                        _used_fast_path = True\n"
     "                except Exception:\n"
     "                    pass  # fall through to Python path below\n"
     "\n"
     "            if _used_fast_path:\n"
-    "                rom_crc_c = int(f_crc_hex, 16)\n"
+    "                rom_crc_c = int(f_crc_hex, 16) if f_crc_hex else 0\n"
     '                rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""\n'
     '                rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""\n'
     "                file_hash = FileHash(\n"
@@ -184,7 +197,7 @@ NEW_BRANCH_HEADER = (
     "                    ),\n"
     "                )\n"
     "            else:\n"
-    "                # Python path: archive files, or _fh unavailable/failed\n"
+    "                # Python path: archive files, or no plugin available/failed\n"
     "                try:\n"
     "                    crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (\n"
     "                        await asyncio.to_thread(\n"
@@ -286,8 +299,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Verify the result looks sane
-if ! grep -q "_fasthash" "$TMP_PATCHED"; then
-    log "ERROR: Re-patched file is missing _fasthash — aborting."
+if ! grep -q "plugin_manager" "$TMP_PATCHED"; then
+    log "ERROR: Re-patched file is missing plugin_manager — aborting."
     rm -f "$TMP_STOCK" "$TMP_PATCHED"
     exit 1
 fi
@@ -304,7 +317,17 @@ path = sys.argv[1]
 out = open(path).read()
 
 IMPORT_ANCHOR = (
-    "try:\n    import _fasthash as _fh\nexcept ImportError:\n    _fh = None\n"
+    "try:\n"
+    "    import plugin_manager as _pm\n"
+    '    _pm.load_plugins("/romm-plugin/plugins")\n'
+    "except Exception:\n"
+    "    # Broader than ImportError on purpose: a broken plugin_manager or a\n"
+    "    # bad load_plugins() call must never prevent roms_handler.py itself\n"
+    "    # from importing -- that would block RomM from starting at all,\n"
+    "    # worse than just losing the fast path. load_plugins() is designed\n"
+    "    # to never raise on its own (bad plugins are logged and skipped),\n"
+    "    # this is a second line of defense.\n"
+    "    _pm = None\n"
 )
 IMPORT_NEW = IMPORT_ANCHOR + (
     "try:\n    import fast_scan_cache as _fsc\nexcept Exception:\n    _fsc = None\n"
@@ -340,18 +363,24 @@ NEW_BRANCH = '''        elif hashable_platform:
                 )
             else:
                 _used_fast_path = False
-                if _fh is not None and rom_ext not in ARCHIVE_READERS:
-                    # Fast C path: GIL-released CRC32+MD5+SHA1 in one pass
+                if _pm is not None and rom_ext not in ARCHIVE_READERS:
+                    # Native plugin path: GIL-released CRC32+MD5+SHA1 in one
+                    # pass, via whatever hash_file-hook plugin is loaded
+                    # (see plugins/README.md). plugin_manager itself fails
+                    # open (returns None) rather than raising, but the
+                    # try/except stays as a second line of defense.
                     try:
-                        f_crc_hex, f_md5_hex, f_sha1_hex = await asyncio.to_thread(
-                            _fh.hash_file, str(Path(abs_fs_path, rom.fs_name))
+                        _plugin_result = await asyncio.to_thread(
+                            _pm.hash_file, str(Path(abs_fs_path, rom.fs_name))
                         )
-                        _used_fast_path = True
+                        if _plugin_result is not None:
+                            f_crc_hex, f_md5_hex, f_sha1_hex = _plugin_result
+                            _used_fast_path = True
                     except Exception:
                         pass  # fall through to Python path below
 
                 if _used_fast_path:
-                    rom_crc_c = int(f_crc_hex, 16)
+                    rom_crc_c = int(f_crc_hex, 16) if f_crc_hex else 0
                     rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
                     rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
                     file_hash = FileHash(
@@ -363,7 +392,7 @@ NEW_BRANCH = '''        elif hashable_platform:
                         ),
                     )
                 else:
-                    # Python path: archive files, or _fh unavailable/failed
+                    # Python path: archive files, or no plugin available/failed
                     try:
                         crc_c, rom_crc_c, md5_h, rom_md5_h, sha1_h, rom_sha1_h = (
                             await asyncio.to_thread(

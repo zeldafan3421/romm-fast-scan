@@ -1,35 +1,82 @@
 name: Build and Push Container Image
 
+# Builds and publishes a ghcr.io image for every RomM version known_sha256.txt
+# covers (scripts/list_known_versions.py) -- adding support for a new RomM
+# version is "run refresh.sh, commit the result"; this workflow does the
+# rest automatically. See CLAUDE.md's "Versioning model" section.
+
 on:
   push:
     branches:
       - main
     paths:
       - 'Containerfile'
+      - 'Dockerfile'
+      - 'include/**'
+      - 'plugins/**'
       - 'src/**'
       - 'overrides/**'
       - 'roms_handler.patch'
       - 'known_sha256.txt'
       - 'start.sh'
-      - 'refresh.sh'
+      - 'scripts/refresh.sh'
+      - 'scripts/list_known_versions.py'
       - '.github/workflows/build-container.yml'
   workflow_dispatch:
     inputs:
-      build_tag:
-        description: 'Image tag (e.g., 4.9.2-fast-scan)'
-        required: true
-        default: '4.9.2-fast-scan'
+      version:
+        description: 'Build only this RomM version (e.g. 4.9.2). Leave blank to build every known version.'
+        required: false
+        default: ''
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Guard -- this repo must never touch RomM's frontend
+        # Cheap enforcement of the "indefinite frontend compatibility"
+        # commitment (CLAUDE.md's Roadmap section): nothing in the patch
+        # mechanism should ever reference a frontend path. Fails fast,
+        # before any build work runs, if that ever stops being true.
+        run: |
+          if grep -riq "frontend" roms_handler.patch overrides/prepatched/*.py 2>/dev/null; then
+            echo "::error::Found a 'frontend' reference in roms_handler.patch or overrides/prepatched/ -- this repo commits to never touching RomM's frontend. Investigate before merging." >&2
+            grep -rin "frontend" roms_handler.patch overrides/prepatched/*.py
+            exit 1
+          fi
+          echo "OK: no frontend references found."
+
+      - name: List known versions
+        id: list
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            python3 scripts/list_known_versions.py --only "${{ github.event.inputs.version }}" > /dev/null
+            MATRIX=$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "${{ github.event.inputs.version }}")
+          else
+            MATRIX=$(python3 scripts/list_known_versions.py --json)
+          fi
+          echo "Building matrix: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.versions.outputs.matrix) }}
 
     steps:
       - name: Checkout repository
@@ -51,9 +98,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
-            type=raw,value=4.9.2-fast-scan
+            type=raw,value=${{ matrix.version }}-fast-scan
 
       - name: Build and push image
         uses: docker/build-push-action@v5
@@ -63,11 +108,13 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            BASE_IMAGE=docker.io/rommapp/romm:${{ matrix.version }}
+          cache-from: type=gha,scope=${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.version }}
 
       - name: Image pushed successfully
         run: |
-          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:4.9.2-fast-scan"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
           echo "To use it:"
-          echo "  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:4.9.2-fast-scan"
+          echo "  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"

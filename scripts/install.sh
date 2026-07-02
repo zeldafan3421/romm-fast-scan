@@ -27,15 +27,20 @@ echo ""
 
 # ── 1. Copy plugin files to the service data directory ───────────────────────
 echo "→ Installing plugin files to: $DEST"
-mkdir -p "$DEST/lib"
+mkdir -p "$DEST"
 cp -r "$REPO_ROOT/src"               "$DEST/"
 cp -r "$REPO_ROOT/overrides"         "$DEST/"
+cp -r "$REPO_ROOT/include"           "$DEST/"
+cp -r "$REPO_ROOT/plugins"           "$DEST/"
 cp    "$REPO_ROOT/start.sh"          "$DEST/"
 cp    "$REPO_ROOT/roms_handler.patch" "$DEST/"
 cp    "$REPO_ROOT/known_sha256.txt"  "$DEST/"
 cp    "$SCRIPT_DIR/refresh.sh"       "$DEST/"
 chmod +x "$DEST/start.sh" "$DEST/refresh.sh"
-touch "$DEST/lib/.gitkeep"
+# Compiled .so/finalized plugin.json under $DEST/plugins/*/ are build
+# artifacts start.sh produces on first boot -- don't ship any that happen
+# to exist from a local scripts/build-plugins.sh run in this checkout.
+rm -f "$DEST"/plugins/*/*.so "$DEST"/plugins/*/plugin.json
 
 echo "  Done."
 echo ""
@@ -53,14 +58,15 @@ echo "  $REPO_ROOT/examples/romm.patched.example.yml for the expected result."
 # ── 3. Sanity check ──────────────────────────────────────────────────────────
 echo ""
 echo "→ Installed files:"
-find "$DEST" -not -path "$DEST/lib" | sort | sed "s|$DEST|  plugin:|"
+find "$DEST" | sort | sed "s|$DEST|  plugin:|"
 
 echo ""
 echo "=== Install complete ==="
 echo ""
 echo "On next pod start, start.sh will:"
-echo "  1. Compile _fasthash.so inside the container (takes ~5 s, one time only)"
-echo "  2. Patch roms_handler.py"
+echo "  1. Compile each native plugin under plugins/*/ inside the container"
+echo "     (takes a few seconds, one time only -- cached after that)"
+echo "  2. Patch roms_handler.py to call into the plugin system"
 echo "  3. Start RomM normally"
 echo ""
 echo "If anything fails, RomM falls back to pure Python — no data is at risk."

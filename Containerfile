@@ -5,7 +5,8 @@
 #
 # This image:
 #   • Pins to a specific RomM version (e.g., 4.9.2)
-#   • Pre-compiles the C extension at build time (no runtime compilation)
+#   • Pre-compiles every native plugin under plugins/*/ at build time
+#     (no runtime compilation)
 #   • Patches roms_handler.py at build time
 #   • Still respects the normal start.sh logic (three-tier patching)
 #
@@ -21,9 +22,13 @@
 # Notes:
 #   • Defaults to RomM 4.9.2; override with --build-arg BASE_IMAGE=... to
 #     build against a different RomM tag (see BASE_IMAGE below)
-#   • The builder stage is BASE_IMAGE itself (not a generic alpine:latest),
-#     so the compiled .so is always built for BASE_IMAGE's actual Python --
-#     no EXT_SUFFIX mismatch, no runtime recompile needed
+#   • Plugins are plain C-ABI shared libraries (include/romm_plugin_abi.h,
+#     loaded via ctypes at runtime -- see src/plugin_manager.py), so unlike
+#     the old single CPython extension this replaced, they have no Python
+#     ABI coupling at all. The builder stage below can be a generic
+#     alpine:latest again (it doesn't need to match BASE_IMAGE's Python --
+#     there's no Python involved in a plugin .so in the first place), and
+#     a plugin built once here loads unmodified on any RomM/Python version.
 #   • If the patch no longer applies to BASE_IMAGE's roms_handler.py, the
 #     image still builds; start.sh falls back to pure Python at runtime.
 #     Run refresh.sh inside a running container to regenerate the patch,
@@ -34,54 +39,55 @@
 
 ARG BASE_IMAGE=docker.io/rommapp/romm:4.9.2
 
-# Build stage: compile the C extension against the *exact same image* that
-# will run it (not a generic alpine:latest). The compiled .so's filename is
-# tied to the builder's Python ABI (e.g. cpython-313-x86_64-linux-musl.so),
-# and RomM's image doesn't necessarily track Alpine's default python3
-# package version/build -- pinning the builder to alpine:latest silently
-# produced a .so for the wrong Python, which start.sh then had to discard
-# and recompile at runtime every boot anyway, defeating the point of
-# pre-compiling at build time. Building FROM the target image guarantees a
-# match by construction, regardless of how that image gets its Python.
-FROM ${BASE_IMAGE} AS builder
+# Build stage: compile every native plugin under plugins/*/. A generic
+# Alpine image is fine here -- see the Python-ABI-coupling note above.
+FROM alpine:latest AS builder
 
-RUN apk add --no-cache \
-    python3-dev \
-    gcc musl-dev \
-    openssl-dev zlib-dev
+RUN apk add --no-cache gcc musl-dev openssl-dev zlib-dev
 
 WORKDIR /build
-COPY src/ /build/src/
+COPY include/ /build/include/
+COPY plugins/ /build/plugins/
 
-# Plain shell rather than a Python heredoc: `RUN <<EOF` blocks need a
-# BuildKit-compatible frontend (a `# syntax=` directive, or Docker Buildx),
-# and podman/buildah's default parser doesn't support them out of the box.
-# This mirrors start.sh's compile_extension() at runtime.
-RUN EXT_SUFFIX=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))") && \
-    INC=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))") && \
-    echo "EXT_SUFFIX: $EXT_SUFFIX" && \
-    echo "Include path: $INC" && \
-    gcc -O2 -std=c99 -Wall -fPIC -shared \
-        -o "_fasthash${EXT_SUFFIX}" \
-        src/_fasthash.c \
-        -I"$INC" \
-        -lssl -lcrypto -lz && \
-    echo "Built: _fasthash${EXT_SUFFIX}"
+# Plain shell, no heredoc: `RUN <<EOF` blocks need a BuildKit-compatible
+# frontend and podman/buildah's default parser doesn't support them --
+# this project leads with Podman throughout, so avoid the dependency.
+# Mirrors start.sh's compile_plugins() at runtime; the sha256 -> plugin.json
+# step uses sed instead of python3 so the builder doesn't need Python at all.
+RUN for tmpl in /build/plugins/*/plugin.json.tmpl; do \
+        plugin_dir=$(dirname "$tmpl"); \
+        plugin_name=$(basename "$plugin_dir"); \
+        so_file=$(sed -n 's/.*"so_file": *"\([^"]*\)".*/\1/p' "$tmpl"); \
+        src_c=$(find "$plugin_dir" -maxdepth 1 -name '*.c' | head -1); \
+        case "$plugin_name" in \
+            fasthash) LDFLAGS="-lssl -lcrypto -lz -lpthread" ;; \
+            *) LDFLAGS="" ;; \
+        esac; \
+        echo "Building $plugin_name -> $so_file"; \
+        gcc -O2 -std=c99 -fPIC -shared -I /build/include \
+            -o "$plugin_dir/$so_file" "$src_c" $LDFLAGS; \
+        sha256=$(sha256sum "$plugin_dir/$so_file" | awk '{print $1}'); \
+        sed "s/\"sha256\": null/\"sha256\": \"$sha256\"/" "$tmpl" > "$plugin_dir/plugin.json"; \
+        echo "Built: $plugin_dir/$so_file (sha256=$sha256)"; \
+    done
 
 # Stage 2: Final RomM image with plugin
 FROM ${BASE_IMAGE}
 
-# Install runtime dependencies for the C extension
+# Runtime dependency for the fasthash plugin's libssl/libcrypto/libz --
+# archive-list needs nothing beyond libc, already present.
 RUN apk add --no-cache openssl-dev zlib-dev
 
-# Create plugin directory structure
-RUN mkdir -p /romm-plugin/lib /romm-plugin/overrides/prepatched
+RUN mkdir -p /romm-plugin/src /romm-plugin/overrides/prepatched
 
-# Copy pre-compiled C extension from builder
-COPY --from=builder /build/_fasthash* /romm-plugin/lib/
+# include/ is kept at runtime too (not just in the builder) so start.sh's
+# compile_plugins() can still recompile on demand -- e.g. if a .so is ever
+# deleted from a running container -- on an image-based deployment, not
+# just the volume-mount one.
+COPY include/ /romm-plugin/include/
+COPY --from=builder /build/plugins/ /romm-plugin/plugins/
 
-# Copy plugin source and utilities
-COPY src/fast_scan_cache.py /romm-plugin/src/fast_scan_cache.py
+COPY src/ /romm-plugin/src/
 COPY overrides/prepatched/ /romm-plugin/overrides/prepatched/
 COPY roms_handler.patch /romm-plugin/
 COPY known_sha256.txt /romm-plugin/
@@ -103,6 +109,11 @@ ENTRYPOINT ["/romm-plugin/start.sh"]
 #     -t romm:5.0.0-fast-scan .
 #
 # (scripts/build-image.sh wraps this: `sh scripts/build-image.sh 5.0.0`)
+#
+# Since plugins have no Python-ABI coupling, the *builder* stage doesn't
+# need to change at all when BASE_IMAGE does -- only stage 2 (the actual
+# RomM image being extended) does. A plugin compiled for one RomM version
+# is exactly as valid for any other.
 #
 # This always applies the plugin at build time -- there's no fallback to an
 # unpatched image. If that's not what you want (e.g. you want to keep

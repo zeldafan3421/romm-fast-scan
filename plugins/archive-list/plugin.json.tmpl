@@ -1,0 +1,16 @@
+{
+  "name": "archive-list",
+  "abi_version": 1,
+  "so_file": "libarchive_list.so",
+  "sha256": null,
+  "hooks": {
+    "archive_list": {
+      "entry_symbols": {
+        "open": "romm_archive_open",
+        "entry_count": "romm_archive_entry_count",
+        "entry_at": "romm_archive_entry_at",
+        "close": "romm_archive_close"
+      }
+    }
+  }
+}
