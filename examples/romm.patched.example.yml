@@ -50,6 +50,11 @@ spec:
         # ── fast-scan plugin: make plugin_manager importable ──────────────
         - name: PYTHONPATH
           value: "/romm-plugin/src:/backend"
+        # ── fast-scan plugin: plugins built by this install path aren't
+        # signed -- see plugins/README.md "Signing and
+        # FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+        - name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+          value: "1"
 
       volumeMounts:
         - name: library-folder

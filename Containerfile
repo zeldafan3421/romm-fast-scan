@@ -54,10 +54,24 @@ COPY plugins/ /build/plugins/
 # this project leads with Podman throughout, so avoid the dependency.
 # Mirrors start.sh's compile_plugins() at runtime; the sha256 -> plugin.json
 # step uses sed instead of python3 so the builder doesn't need Python at all.
+#
+# Skips a plugin whose .so already exists in the build context: the
+# official ghcr.io image pipeline (.github/workflows/build-container.yml's
+# sign-plugins job) pre-builds and *signs* plugins before this Containerfile
+# ever runs, then hands the already-built plugins/ directory in as part of
+# the build context -- without this check, this stage would happily
+# recompile over them with a fresh, unsigned .so, silently discarding the
+# signature. A local/dev build (scripts/build-image.sh, no signing key
+# involved) never has pre-built .so files in its checkout, so this is a
+# no-op for that path -- it builds fresh, unsigned, exactly as before.
 RUN for tmpl in /build/plugins/*/plugin.json.tmpl; do \
         plugin_dir=$(dirname "$tmpl"); \
         plugin_name=$(basename "$plugin_dir"); \
         so_file=$(sed -n 's/.*"so_file": *"\([^"]*\)".*/\1/p' "$tmpl"); \
+        if [ -f "$plugin_dir/$so_file" ]; then \
+            echo "Cached (pre-built): $plugin_dir/$so_file"; \
+            continue; \
+        fi; \
         src_c=$(find "$plugin_dir" -maxdepth 1 -name '*.c' | head -1); \
         case "$plugin_name" in \
             fasthash) LDFLAGS="-lssl -lcrypto -lz -lpthread" ;; \
@@ -71,12 +85,27 @@ RUN for tmpl in /build/plugins/*/plugin.json.tmpl; do \
         echo "Built: $plugin_dir/$so_file (sha256=$sha256)"; \
     done
 
+# Export-only stage: just the built plugins/, nothing else from the Alpine
+# builder's filesystem. Not part of the normal 2-stage build (a plain
+# `docker build .`/`podman build .` never builds this, since it isn't an
+# ancestor of the default final stage below) -- exists only so CI's
+# sign-plugins job can `--target plugins-export -o type=local` a minimal
+# artifact to sign, instead of exporting the builder stage's entire
+# filesystem (gcc, musl-dev, and everything else Alpine) just to reach a
+# few hundred KB of .so files.
+FROM scratch AS plugins-export
+COPY --from=builder /build/plugins/ /
+
 # Stage 2: Final RomM image with plugin
 FROM ${BASE_IMAGE}
 
-# Runtime dependency for the fasthash plugin's libssl/libcrypto/libz --
-# archive-list needs nothing beyond libc, already present.
-RUN apk add --no-cache openssl-dev zlib-dev
+# Runtime dependencies: openssl-dev/zlib-dev for the fasthash plugin's
+# libssl/libcrypto/libz (archive-list needs nothing beyond libc, already
+# present); openssh-keygen so plugin_manager.py can always verify official
+# plugins' signatures on this image without depending on anything the
+# volume-mount/first-boot path might or might not have installed -- see
+# plugins/README.md's "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS".
+RUN apk add --no-cache openssl-dev zlib-dev openssh-keygen
 
 RUN mkdir -p /romm-plugin/src /romm-plugin/overrides/prepatched
 

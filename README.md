@@ -70,6 +70,8 @@ sh scripts/build-image.sh          # builds romm:4.9.2-fast-scan locally
 
 Then point `image:` at the local tag (`localhost/romm:4.9.2-fast-scan`) instead of the ghcr.io one, and restart the same way. `scripts/build-image.sh <version> <registry>` also builds for other RomM versions and can push to your own registry — see the script's usage comment.
 
+A locally-built image isn't signed the way the published `ghcr.io` image is (only this repo's CI holds the private signing key) — add `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS: "1"` (see "Plugin signing" under Configuration below) or your plugins won't load.
+
 Either option: on first boot you'll see
 
 ```
@@ -90,6 +92,8 @@ Either option: on first boot you'll see
 This path stays fully supported, with no warning, as **the go-to way to try the plugin on a RomM version this repo hasn't published an image for yet** — e.g. right after a new RomM release, before someone's built and pushed a matching `X.Y.Z-fast-scan` tag. It's also still available if you specifically want to keep running `docker.io/rommapp/romm:latest` directly (auto-tracking upstream without picking a version-pinned tag) — pass `--allow-deprecated` to `patch_romm_yaml.py` if you're doing that against a supported version; tracking `:latest` itself is never blocked, since the version can't be determined ahead of time.
 
 Unlike Option A/B, this volume-mounts the plugin onto the stock image, so plugins compile inside the container on first boot instead of at image-build time — and if the version turns out to be new enough that the committed patch doesn't apply cleanly, it's the same `refresh.sh` workflow (see [Staying up to date with RomM](#staying-up-to-date-with-romm) below) that's used to generate the patch for the next official image in the first place.
+
+Plugins compiled this way aren't signed (only this repo's CI holds the private signing key), so this path needs `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS: "1"` in your pod YAML — see "Plugin signing" under [Configuration](#configuration).
 
 ### 1. Deploy plugin files to your server
 
@@ -170,6 +174,17 @@ With the GIL released, workers actually run in parallel — unlike stock RomM wh
 On an unchanged library this turns a full rescan from "read every byte" into a stat pass — minutes instead of hours on an HDD. It composes with the fasthash plugin, which still accelerates the files that actually changed.
 
 **Default off** — it's opt-in because a file edited in place that preserves both its size and mtime (rare; some sync tools do this) would not be re-hashed. It is fail-safe: any problem (disabled, unavailable, file changed, no stored record) falls back to reading and hashing the file normally, so it can never produce a wrong hash. Scope: single-file ROMs; multi-disc and archive ROMs always hash normally.
+
+### Plugin signing
+
+Official plugins are signed at build time; `plugin_manager.py` refuses to load an unsigned plugin by default — including a plugin you build yourself from this repo's own source (see `plugins/README.md`'s "Signing and `FAST_SCAN_ALLOW_UNSIGNED_PLUGINS`" for why). If you're on the volume-mount install or you built a plugin locally with `scripts/build-plugins.sh`, set:
+
+```yaml
+- name: FAST_SCAN_ALLOW_UNSIGNED_PLUGINS
+  value: "1"
+```
+
+If you're on a prebuilt `ghcr.io/zeldafan3421/romm-fast-scan` image, you don't need this — those plugins are already signed.
 
 ---
 
@@ -279,6 +294,7 @@ romm-fast-scan/
 │   │   └── romm_plugin_abi.h    The C-ABI contract every plugin implements
 │   ├── plugins/
 │   │   ├── README.md            Plugin authoring guide (start here to add a plugin)
+│   │   ├── official-signers.txt Public key(s) plugin_manager.py verifies signatures against
 │   │   ├── fasthash/            hash_file + hash_file_accum hooks (CRC32/MD5/SHA1)
 │   │   │   ├── fasthash.c
 │   │   │   └── plugin.json.tmpl

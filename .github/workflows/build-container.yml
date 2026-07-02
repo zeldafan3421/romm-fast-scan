@@ -67,8 +67,79 @@ jobs:
           echo "Building matrix: $MATRIX"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
+  sign-plugins:
+    # Builds the plugins once (version-independent -- a plugin .so has no
+    # RomM/Python-version coupling at all, see plugins/README.md) and signs
+    # them with PLUGIN_SIGNING_KEY, so every matrix leg below reuses one
+    # signed artifact instead of rebuilding+resigning per RomM version.
+    #
+    # The private key lives only in this job, only for the few seconds it
+    # takes to sign, and is deleted immediately after. It is never written
+    # anywhere inside the Docker build context or an image layer -- see
+    # plugins/README.md's "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+    # for why that's a hard requirement, not a preference.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build plugins-export stage only (no image produced)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: plugins-export
+          push: false
+          outputs: type=local,dest=./built-plugins
+          cache-from: type=gha,scope=plugins
+          cache-to: type=gha,mode=max,scope=plugins
+
+      - name: Sign official plugins
+        env:
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          if [ -z "$PLUGIN_SIGNING_KEY" ]; then
+            echo "::error::PLUGIN_SIGNING_KEY secret is not set -- cannot sign official plugins. Every plugin will load unsigned (requiring FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1) until this is fixed." >&2
+            exit 1
+          fi
+
+          KEY_FILE="$RUNNER_TEMP/plugin-signing-key"
+          (umask 077 && printf '%s\n' "$PLUGIN_SIGNING_KEY" > "$KEY_FILE")
+
+          SIGNED_ANY=0
+          for manifest in built-plugins/*/plugin.json; do
+            [ -f "$manifest" ] || continue
+            plugin_dir=$(dirname "$manifest")
+            plugin_name=$(basename "$plugin_dir")
+            so_file=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['so_file'])" "$manifest")
+            so_path="$plugin_dir/$so_file"
+            echo "Signing $plugin_name ($so_path)"
+            ssh-keygen -Y sign -f "$KEY_FILE" -n romm-fast-scan-plugin "$so_path"
+            SIGNED_ANY=1
+          done
+
+          rm -f "$KEY_FILE"
+
+          if [ "$SIGNED_ANY" = "0" ]; then
+            echo "::error::No plugin.json found under built-plugins/ -- nothing was signed. Check the plugins-export stage." >&2
+            exit 1
+          fi
+
+      - name: Upload signed plugins artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-plugins
+          path: built-plugins/
+          retention-days: 1
+          if-no-files-found: error
+
   build:
-    needs: versions
+    needs: [versions, sign-plugins]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,6 +152,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download signed plugins artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-plugins
+          path: plugins/
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
