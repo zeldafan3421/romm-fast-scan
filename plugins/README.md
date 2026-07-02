@@ -90,7 +90,12 @@ Pick whichever matches what you're building; add a new one to
   code should be defensive), the handle's own state needs locking. A
   data race here was a real, ThreadSanitizer-confirmed bug in the
   CPython-extension version this was ported from before that lock
-  existed — don't drop it if you touch this pattern.
+  existed — don't drop it if you touch this pattern. Like `archive_list`
+  below, this hook is **not yet wired into `roms_handler.py`** — proven at
+  the plugin-system level (loads, callable, matches the old
+  `MultiFileHasher`'s output) but nothing in RomM's current scan path
+  calls `plugin_manager.new_multi_file_accumulator()` yet. Multi-disc ROMs
+  still hash through the stock per-file path today.
 - **`archive_list`** — another opaque-handle hook, this one for listing a
   ZIP's members (name, sizes, stored CRC32) without decompressing
   anything. See `archive-list/archive_list.c`. Good reference for a

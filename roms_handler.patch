@@ -99,7 +99,7 @@
 +                        pass  # fall through to Python path below
 +
 +                if _used_fast_path:
-+                    rom_crc_c = int(f_crc_hex, 16)
++                    rom_crc_c = int(f_crc_hex, 16) if f_crc_hex else 0
 +                    rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
 +                    rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
 +                    file_hash = FileHash(

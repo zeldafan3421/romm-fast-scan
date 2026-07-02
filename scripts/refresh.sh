@@ -185,7 +185,7 @@ NEW_BRANCH_HEADER = (
     "                    pass  # fall through to Python path below\n"
     "\n"
     "            if _used_fast_path:\n"
-    "                rom_crc_c = int(f_crc_hex, 16)\n"
+    "                rom_crc_c = int(f_crc_hex, 16) if f_crc_hex else 0\n"
     '                rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""\n'
     '                rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""\n'
     "                file_hash = FileHash(\n"
@@ -380,7 +380,7 @@ NEW_BRANCH = '''        elif hashable_platform:
                         pass  # fall through to Python path below
 
                 if _used_fast_path:
-                    rom_crc_c = int(f_crc_hex, 16)
+                    rom_crc_c = int(f_crc_hex, 16) if f_crc_hex else 0
                     rom_md5_hex = f_md5_hex if f_md5_hex != _DEFAULT_MD5_HEX else ""
                     rom_sha1_hex = f_sha1_hex if f_sha1_hex != _DEFAULT_SHA1_HEX else ""
                     file_hash = FileHash(

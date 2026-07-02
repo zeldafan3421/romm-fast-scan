@@ -112,6 +112,22 @@ compile_plugins || true
 patch_handler() {
     [ -f "$TARGET_PY" ] || { log "Target $TARGET_PY not found — skipping patch"; return; }
 
+    # Already-patched check: roms_handler.py lives in the container's own
+    # filesystem, not a host bind mount, so it persists across restarts of
+    # the *same* container instance -- a previous boot's successful tier-a/b
+    # patch is still there on the next boot. Without this check, tier-a's
+    # SHA lookup (which only maps *unpatched* upstream SHAs) and tier-b's
+    # `patch --dry-run` (which correctly refuses to re-apply an
+    # already-applied patch) both "fail" here even though nothing is wrong
+    # -- every restart after the first successful patch would otherwise log
+    # a false "Could not patch" warning claiming hashing fell back to pure
+    # Python when it never did. Checked first, before computing CURRENT_SHA
+    # below, since there's nothing left to diagnose if this is already true.
+    if grep -q "import plugin_manager as _pm" "$TARGET_PY" 2>/dev/null; then
+        log "roms_handler.py already patched (plugin_manager integration present)"
+        return
+    fi
+
     # Computed once up front (not nested in the tier-1 branch below) so it's
     # always available for the diagnostic message at the bottom if every tier
     # fails -- the single most useful piece of information for figuring out
@@ -154,7 +170,12 @@ patch_handler() {
     fi
 
     # c. Neither worked — warn loudly but let RomM start normally
-    ROMM_VER=$("$PYTHON" -c "import importlib.metadata; print(importlib.metadata.version('romm'))" 2>/dev/null || echo "unknown")
+    # RomM isn't pip-installed under a "romm" distribution name, so
+    # importlib.metadata.version('romm') always raises -- read the same
+    # __version__.py that /init's own print_banner() reads (relative to
+    # /backend, which is why that's hardcoded here rather than relying on
+    # start.sh's own cwd).
+    ROMM_VER=$("$PYTHON" -c "exec(open('/backend/__version__.py').read()); print(__version__)" 2>/dev/null || echo "unknown")
     log "WARNING: Could not patch roms_handler.py."
     log "         RomM has likely updated. Any compiled plugins are still there,"
     log "         but hashing falls back to pure Python until you update the plugin."
