@@ -164,6 +164,8 @@ Set `SCAN_WORKERS` in your pod YAML based on your storage:
 
 More workers help most on many-small-file libraries and fast storage; on a single spinning disk, scans are I/O-bound and extra workers past a handful give little. See [How it works](#how-it-works) for measured figures.
 
+Running your library across a multi-device btrfs pool (`single` data profile spread over several drives) changes this calculus — see [`docs/BTRFS_MULTIDRIVE.md`](docs/BTRFS_MULTIDRIVE.md) for setting one up and tuning `SCAN_WORKERS` for it.
+
 ### Library size profiles (`LIBRARY_SIZE`)
 
 By default the plugin is a **pure passthrough** — it makes scans faster and changes nothing else about how RomM behaves. Some of RomM's stock defaults get in the way once a library is big enough, though, so `LIBRARY_SIZE` lets you opt into a set of size-appropriate defaults in one switch:
