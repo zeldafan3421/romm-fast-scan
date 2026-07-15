@@ -12,3 +12,4 @@
 
 6787b06ba69ed8cdfcc7efded1a43cfd535bad6bc6ea07499b133baa2c1b9207  4.9.2.py            # RomM 4.9.2
 c7ead04bb955548a339d24e850a88544043bf82597527c56252e69b4cf9a3e85  5.0.0-alpha.2.py    # RomM 5.0.0-alpha.2
+8509ac2362aea2bf0b30f2f70fdff4cc9ebfb0b25699ffe40e84c76c3603b10e  5.0.0.py            # RomM 5.0.0

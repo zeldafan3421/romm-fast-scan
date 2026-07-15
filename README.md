@@ -2,7 +2,7 @@
 
 A drop-in scanning performance plugin for [RomM](https://github.com/rommapp/romm) built on a small native-plugin system: RomM's `roms_handler.py` is patched **once** to call into `plugin_manager.py`, which loads plain C-ABI `.so` plugins at runtime. The first plugin, `fasthash`, replaces RomM's pure-Python file hashing with GIL-released native CRC32/MD5/SHA1, enabling genuine parallel hashing across scan workers.
 
-Committed to supporting every RomM **5.\*.\*** backend release, indefinitely — see [Compatibility commitment](#compatibility-commitment) below. Verified today against RomM **4.9.2** and **5.0.0-alpha.2**.
+Committed to supporting every RomM **5.\*.\*** backend release, indefinitely — see [Compatibility commitment](#compatibility-commitment) below. Verified today against RomM **4.9.2**, **5.0.0-alpha.2**, and **5.0.0**.
 
 ---
 
@@ -340,7 +340,8 @@ romm-fast-scan/
 │   ├── overrides/
 │   │   └── prepatched/          Pre-patched handlers, one per known RomM version
 │   │       ├── 4.9.2.py
-│   │       └── 5.0.0-alpha.2.py
+│   │       ├── 5.0.0-alpha.2.py
+│   │       └── 5.0.0.py
 │   ├── start.sh                 Container entrypoint wrapper (core plugin file)
 │   ├── roms_handler.patch       Minimal unified diff applied at boot
 │   └── known_sha256.txt         Maps each known roms_handler.py SHA → pre-patched file
