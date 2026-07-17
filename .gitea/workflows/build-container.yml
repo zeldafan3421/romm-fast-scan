@@ -1,0 +1,197 @@
+name: Build and Push Container Image
+
+# Builds and publishes a ghcr.io image for every RomM version known_sha256.txt
+# covers (scripts/list_known_versions.py) -- adding support for a new RomM
+# version is "run refresh.sh, commit the result"; this workflow does the
+# rest automatically. See CLAUDE.md's "Versioning model" section.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Containerfile'
+      - 'Dockerfile'
+      - 'include/**'
+      - 'plugins/**'
+      - 'src/**'
+      - 'overrides/**'
+      - 'roms_handler.patch'
+      - 'known_sha256.txt'
+      - 'start.sh'
+      - 'scripts/refresh.sh'
+      - 'scripts/list_known_versions.py'
+      - '.github/workflows/build-container.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Build only this RomM version (e.g. 4.9.2). Leave blank to build every known version.'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Guard -- this repo must never touch RomM's frontend
+        # Cheap enforcement of the "indefinite frontend compatibility"
+        # commitment (CLAUDE.md's Roadmap section): nothing in the patch
+        # mechanism should ever reference a frontend path. Fails fast,
+        # before any build work runs, if that ever stops being true.
+        run: |
+          if grep -riq "frontend" roms_handler.patch overrides/prepatched/*.py 2>/dev/null; then
+            echo "::error::Found a 'frontend' reference in roms_handler.patch or overrides/prepatched/ -- this repo commits to never touching RomM's frontend. Investigate before merging." >&2
+            grep -rin "frontend" roms_handler.patch overrides/prepatched/*.py
+            exit 1
+          fi
+          echo "OK: no frontend references found."
+
+      - name: List known versions
+        id: list
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            python3 scripts/list_known_versions.py --only "${{ github.event.inputs.version }}" > /dev/null
+            MATRIX=$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "${{ github.event.inputs.version }}")
+          else
+            MATRIX=$(python3 scripts/list_known_versions.py --json)
+          fi
+          echo "Building matrix: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  sign-plugins:
+    # Builds the plugins once (version-independent -- a plugin .so has no
+    # RomM/Python-version coupling at all, see plugins/README.md) and signs
+    # them with PLUGIN_SIGNING_KEY, so every matrix leg below reuses one
+    # signed artifact instead of rebuilding+resigning per RomM version.
+    #
+    # The private key lives only in this job, only for the few seconds it
+    # takes to sign, and is deleted immediately after. It is never written
+    # anywhere inside the Docker build context or an image layer -- see
+    # plugins/README.md's "Signing and FAST_SCAN_ALLOW_UNSIGNED_PLUGINS"
+    # for why that's a hard requirement, not a preference.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build plugins-export stage only (no image produced)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: plugins-export
+          push: false
+          outputs: type=local,dest=./built-plugins
+          cache-from: type=gha,scope=plugins
+          cache-to: type=gha,mode=max,scope=plugins
+
+      - name: Sign official plugins
+        env:
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          if [ -z "$PLUGIN_SIGNING_KEY" ]; then
+            echo "::error::PLUGIN_SIGNING_KEY secret is not set -- cannot sign official plugins. Every plugin will load unsigned (requiring FAST_SCAN_ALLOW_UNSIGNED_PLUGINS=1) until this is fixed." >&2
+            exit 1
+          fi
+
+          KEY_FILE="$RUNNER_TEMP/plugin-signing-key"
+          (umask 077 && printf '%s\n' "$PLUGIN_SIGNING_KEY" > "$KEY_FILE")
+
+          SIGNED_ANY=0
+          for manifest in built-plugins/*/plugin.json; do
+            [ -f "$manifest" ] || continue
+            plugin_dir=$(dirname "$manifest")
+            plugin_name=$(basename "$plugin_dir")
+            so_file=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['so_file'])" "$manifest")
+            so_path="$plugin_dir/$so_file"
+            echo "Signing $plugin_name ($so_path)"
+            ssh-keygen -Y sign -f "$KEY_FILE" -n romm-fast-scan-plugin "$so_path"
+            SIGNED_ANY=1
+          done
+
+          rm -f "$KEY_FILE"
+
+          if [ "$SIGNED_ANY" = "0" ]; then
+            echo "::error::No plugin.json found under built-plugins/ -- nothing was signed. Check the plugins-export stage." >&2
+            exit 1
+          fi
+
+      - name: Upload signed plugins artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-plugins
+          path: built-plugins/
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    needs: [versions, sign-plugins]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.versions.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download signed plugins artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-plugins
+          path: plugins/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.version }}-fast-scan
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=docker.io/rommapp/romm:${{ matrix.version }}
+          cache-from: type=gha,scope=${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.version }}
+
+      - name: Image pushed successfully
+        run: |
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
+          echo "To use it:"
+          echo "  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
