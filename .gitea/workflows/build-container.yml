@@ -1,32 +1,45 @@
 name: Build and Push Container Image (Gitea)
 
 # Gitea Actions mirror of .github/workflows/build-container.yml -- runs on a
-# self-hosted act_runner and intentionally publishes to the *same*
-# ghcr.io/zeldafan3421/romm-fast-scan image the GitHub workflow does, so both
-# CI systems converge on one canonical artifact per RomM version
-# (scripts/list_known_versions.py). Adding support for a new RomM version is
-# still "run refresh.sh, commit the result" -- this workflow does the rest
-# automatically. See CLAUDE.md's "Versioning model" section.
+# self-hosted, ROOTLESS-PODMAN act_runner (no Docker daemon/socket exists),
+# and intentionally publishes to the *same* ghcr.io/zeldafan3421/romm-fast-scan
+# image the GitHub workflow does, so both CI systems converge on one
+# canonical artifact per RomM version (scripts/list_known_versions.py).
+# Adding support for a new RomM version is still "run refresh.sh, commit the
+# result" -- this workflow does the rest automatically. See CLAUDE.md's
+# "Versioning model" section.
 #
-# Two things differ from a blind copy of the GitHub workflow, both required
-# for this to actually work under Gitea Actions rather than fail silently:
+# Things that differ from a blind copy of the GitHub workflow, all required
+# for this to actually work here:
 #
-#   1. Registry auth: Gitea auto-injects a `secrets.GITHUB_TOKEN` for every
+#   1. No docker/*-actions (setup-buildx-action, login-action,
+#      build-push-action) -- they shell out to the `docker` CLI / expect a
+#      Docker daemon socket, neither of which exists under rootless Podman.
+#      Every build/login/push step below is a plain `podman` CLI call
+#      instead, and builds from `Containerfile` (not `Dockerfile`) -- the
+#      same podman/docker file split scripts/build-image.sh already uses,
+#      see CLAUDE.md's "Building / compiling plugins" section.
+#   2. `podman` itself must be on PATH in the job's container image; the
+#      "Ensure podman is available" steps below install it (best-effort,
+#      apt then apk) if it's missing rather than assuming a particular base
+#      image. This assumes the job container's own user can install
+#      packages (typically root inside the container even when the host
+#      Podman engine running it is rootless) -- if your job image runs as a
+#      non-root, no-sudo user, preinstall podman in that image instead.
+#   3. Registry auth: Gitea auto-injects a `secrets.GITHUB_TOKEN` for every
 #      Actions run, but it authenticates against *this Gitea instance*, not
 #      github.com/ghcr.io -- using it to log into ghcr.io fails. Pushing to
 #      ghcr.io needs a real GitHub PAT (scope: write:packages) added as a
 #      distinct `GHCR_TOKEN` secret in this repo's Gitea settings.
-#   2. This assumes the runner has outbound access to github.com to fetch
-#      actions/checkout, docker/setup-buildx-action, etc. from the GitHub
+#   4. This assumes the runner has outbound access to github.com to fetch
+#      actions/checkout, actions/upload-artifact, etc. from the GitHub
 #      Marketplace (Gitea's default `DEFAULT_ACTIONS_URL` does this
 #      automatically) -- if this instance is air-gapped, swap these `uses:`
-#      lines for the mirrors at https://gitea.com/actions/* (checkout,
-#      upload-artifact, download-artifact) plus a local Docker Buildx setup.
-#   3. cache-from/cache-to: type=gha is dropped below (present in the GitHub
-#      version) -- it depends on this Gitea instance's own Actions cache
-#      backend being enabled server-side, which isn't guaranteed, and a
-#      missing cache backend can hard-fail the build rather than just skip
-#      caching. Re-add it once you've confirmed this instance's cache works.
+#      lines for the mirrors at https://gitea.com/actions/*.
+#   5. No BuildKit means no `type=gha` cache either (that's a BuildKit-only
+#      cache backend, unsupported by Podman/buildah) -- layer caching here
+#      is whatever podman's own local storage gives you between runs on the
+#      same runner, nothing explicit to configure.
 
 on:
   push:
@@ -108,17 +121,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Ensure podman is available
+        run: |
+          command -v podman >/dev/null 2>&1 && exit 0
+          (apt-get update && apt-get install -y podman) 2>/dev/null \
+            || apk add --no-cache podman 2>/dev/null \
+            || { echo "::error::podman not found and could not be installed -- this runner's job image needs podman preinstalled." >&2; exit 1; }
 
       - name: Build plugins-export stage only (no image produced)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          target: plugins-export
-          push: false
-          outputs: type=local,dest=./built-plugins
+        run: |
+          podman build \
+            --file ./Containerfile \
+            --target plugins-export \
+            --output type=local,dest=./built-plugins \
+            .
 
       - name: Sign official plugins
         env:
@@ -180,8 +196,12 @@ jobs:
           name: signed-plugins
           path: plugins/
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Ensure podman is available
+        run: |
+          command -v podman >/dev/null 2>&1 && exit 0
+          (apt-get update && apt-get install -y podman) 2>/dev/null \
+            || apk add --no-cache podman 2>/dev/null \
+            || { echo "::error::podman not found and could not be installed -- this runner's job image needs podman preinstalled." >&2; exit 1; }
 
       - name: Log in to Container Registry
         # Deliberately NOT secrets.GITHUB_TOKEN -- Gitea's auto-injected
@@ -189,33 +209,25 @@ jobs:
         # a real GitHub PAT (scope: write:packages) as GHCR_TOKEN in this
         # repo's Gitea secrets, under the same account that owns the
         # zeldafan3421/romm-fast-scan ghcr.io namespace.
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: zeldafan3421
-          password: ${{ secrets.GHCR_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ matrix.version }}-fast-scan
+        run: echo "${{ secrets.GHCR_TOKEN }}" | podman login ${{ env.REGISTRY }} -u zeldafan3421 --password-stdin
 
       - name: Build and push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=docker.io/rommapp/romm:${{ matrix.version }}
+        run: |
+          TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
+          podman build \
+            --file ./Containerfile \
+            --build-arg BASE_IMAGE=docker.io/rommapp/romm:${{ matrix.version }} \
+            --tag "$TAG" \
+            .
+          podman push "$TAG"
+          echo "Image pushed: $TAG"
 
       - name: Image pushed successfully
         run: |
           echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
           echo "To use it:"
           echo "  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}-fast-scan"
+
+      - name: Log out of Container Registry
+        if: always()
+        run: podman logout ${{ env.REGISTRY }} || true
