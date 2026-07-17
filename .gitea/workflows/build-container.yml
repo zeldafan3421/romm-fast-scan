@@ -1,9 +1,32 @@
-name: Build and Push Container Image
+name: Build and Push Container Image (Gitea)
 
-# Builds and publishes a ghcr.io image for every RomM version known_sha256.txt
-# covers (scripts/list_known_versions.py) -- adding support for a new RomM
-# version is "run refresh.sh, commit the result"; this workflow does the
-# rest automatically. See CLAUDE.md's "Versioning model" section.
+# Gitea Actions mirror of .github/workflows/build-container.yml -- runs on a
+# self-hosted act_runner and intentionally publishes to the *same*
+# ghcr.io/zeldafan3421/romm-fast-scan image the GitHub workflow does, so both
+# CI systems converge on one canonical artifact per RomM version
+# (scripts/list_known_versions.py). Adding support for a new RomM version is
+# still "run refresh.sh, commit the result" -- this workflow does the rest
+# automatically. See CLAUDE.md's "Versioning model" section.
+#
+# Two things differ from a blind copy of the GitHub workflow, both required
+# for this to actually work under Gitea Actions rather than fail silently:
+#
+#   1. Registry auth: Gitea auto-injects a `secrets.GITHUB_TOKEN` for every
+#      Actions run, but it authenticates against *this Gitea instance*, not
+#      github.com/ghcr.io -- using it to log into ghcr.io fails. Pushing to
+#      ghcr.io needs a real GitHub PAT (scope: write:packages) added as a
+#      distinct `GHCR_TOKEN` secret in this repo's Gitea settings.
+#   2. This assumes the runner has outbound access to github.com to fetch
+#      actions/checkout, docker/setup-buildx-action, etc. from the GitHub
+#      Marketplace (Gitea's default `DEFAULT_ACTIONS_URL` does this
+#      automatically) -- if this instance is air-gapped, swap these `uses:`
+#      lines for the mirrors at https://gitea.com/actions/* (checkout,
+#      upload-artifact, download-artifact) plus a local Docker Buildx setup.
+#   3. cache-from/cache-to: type=gha is dropped below (present in the GitHub
+#      version) -- it depends on this Gitea instance's own Actions cache
+#      backend being enabled server-side, which isn't guaranteed, and a
+#      missing cache backend can hard-fail the build rather than just skip
+#      caching. Re-add it once you've confirmed this instance's cache works.
 
 on:
   push:
@@ -21,7 +44,7 @@ on:
       - 'start.sh'
       - 'scripts/refresh.sh'
       - 'scripts/list_known_versions.py'
-      - '.github/workflows/build-container.yml'
+      - '.gitea/workflows/build-container.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -96,8 +119,6 @@ jobs:
           target: plugins-export
           push: false
           outputs: type=local,dest=./built-plugins
-          cache-from: type=gha,scope=plugins
-          cache-to: type=gha,mode=max,scope=plugins
 
       - name: Sign official plugins
         env:
@@ -163,11 +184,16 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
+        # Deliberately NOT secrets.GITHUB_TOKEN -- Gitea's auto-injected
+        # token authenticates against this Gitea instance, not ghcr.io. Add
+        # a real GitHub PAT (scope: write:packages) as GHCR_TOKEN in this
+        # repo's Gitea secrets, under the same account that owns the
+        # zeldafan3421/romm-fast-scan ghcr.io namespace.
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: zeldafan3421
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -187,8 +213,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE_IMAGE=docker.io/rommapp/romm:${{ matrix.version }}
-          cache-from: type=gha,scope=${{ matrix.version }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.version }}
 
       - name: Image pushed successfully
         run: |
