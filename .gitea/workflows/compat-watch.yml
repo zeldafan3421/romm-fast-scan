@@ -1,14 +1,27 @@
-name: RomM Compatibility Watch
+name: RomM Compatibility Watch (Gitea)
 
-# Operationalizes the "5.*.* indefinitely" compatibility commitment (see
-# CLAUDE.md's Roadmap section): weekly, checks whether upstream rommapp/romm
-# has published a 5.x release this repo's known_sha256.txt doesn't cover yet,
-# and if so, opens/refreshes a single tracking issue (label: compat-watch).
+# Gitea Actions mirror of .github/workflows/compat-watch.yml -- same "5.*.*
+# indefinitely" gap check (see CLAUDE.md's Roadmap section), but the
+# tracking issue lives on *this Gitea-hosted repo*, so it can't reuse that
+# workflow's script unmodified:
 #
-# Deliberately does NOT run scripts/refresh.sh or commit anything -- closing
-# a gap still needs a human running refresh.sh inside a live container of
-# the new version and reviewing the generated diff. See
-# scripts/check_upstream_versions.py for the full rationale.
+#   - scripts/check_upstream_versions.py shells out to the `gh` CLI, which
+#     targets github.com. It has no notion of a Gitea-hosted remote, and
+#     Gitea's issue REST API isn't the same shape as GitHub's, so `gh issue
+#     create/edit/close` against this repo would just fail.
+#   - Gitea's auto-injected secrets.GITHUB_TOKEN is *not* a github.com
+#     token (see build-container.yml's comment on the same point), so
+#     passing it to `gh` as GH_TOKEN for the upstream rommapp/romm lookup
+#     would send invalid credentials rather than an anonymous request.
+#
+# scripts/check_upstream_versions_gitea.py fixes both: it fetches upstream
+# rommapp/romm releases straight from GitHub's public REST API via stdlib
+# urllib (no `gh` dependency, no token needed for a public repo's releases),
+# and manages the tracking issue via Gitea's own REST API using the
+# auto-injected token, which *is* valid here since it's authenticating
+# against this same instance. Deliberately does NOT run scripts/refresh.sh
+# or commit anything -- closing a gap still needs a human running refresh.sh
+# inside a live container of the new version and reviewing the diff.
 
 on:
   schedule:
@@ -18,13 +31,11 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Check upstream RomM 5.x releases against known_sha256.txt
-        run: python3 scripts/check_upstream_versions.py
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/check_upstream_versions_gitea.py
